@@ -1,0 +1,14 @@
+# Copy this file to ~/.reader-processor/config.toml (or config.toml in the
+# repo root) and edit.
+
+# Your Send-to-Kindle address (Amazon > Manage Your Content and Devices > Preferences).
+kindle_email = "your-address@kindle.com"
+
+# Gmail label your newsletter filter applies (already exists in your Gmail).
+source_label = "newsletter"
+
+# Label added to a newsletter once something from it was sent.
+sent_label = "kindle-sent"
+
+# How many days back to show in the queue.
+days_back = 14

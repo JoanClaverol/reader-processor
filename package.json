@@ -1,0 +1,36 @@
+{
+  "name": "reader-processor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Send Gmail newsletters and the articles they link to your Kindle as clean EPUBs, from a local dashboard.",
+  "license": "MIT",
+  "bin": {
+    "reader-process": "bin/reader-process.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@11.15.1",
+  "scripts": {
+    "build": "tsc -p frontend/tsconfig.json && tsc -p server/tsconfig.json",
+    "prepare": "pnpm run build",
+    "start": "node bin/reader-process.js",
+    "auth": "node bin/reader-process.js auth"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.6",
+    "@types/jsdom": "^28.0.3",
+    "@types/node": "^26.1.1",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "better-sqlite3": "^12.11.1",
+    "express": "^5.2.1",
+    "googleapis": "^173.0.0",
+    "jsdom": "^29.1.1",
+    "jszip": "^3.10.1",
+    "smol-toml": "^1.7.0"
+  }
+}

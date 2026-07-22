@@ -1,0 +1,13 @@
+# Secrets and local state — never commit.
+# data/ holds credentials.json, token.json (Gmail access!) and the SQLite db.
+data/
+config.toml
+
+# Build output
+dist-server/
+public/main.js
+
+node_modules/
+legacy/
+.venv/
+.DS_Store

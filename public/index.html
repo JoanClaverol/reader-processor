@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>reader-processor</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>📬 reader-processor</h1>
+    <div class="header-actions">
+      <span id="kbd-hint">↑↓ navigate · ⇥ switch pane · space select · ↵ preview · S send</span>
+      <label id="bundle-toggle" title="Combine everything selected into one book with chapters">
+        <input type="checkbox" id="bundle-cb"> 📚 One book
+      </label>
+      <button id="log-btn" class="ghost">Log</button>
+      <button id="send-btn" disabled>Send <span id="send-count">0</span> to Kindle</button>
+    </div>
+  </header>
+  <main>
+    <aside id="email-list" class="col" aria-label="Newsletters">
+      <div class="placeholder">Loading newsletters…</div>
+    </aside>
+    <section id="items-col" class="col">
+      <div id="items" class="col-scroll"><div class="placeholder">Select a newsletter.</div></div>
+    </section>
+    <section id="preview-col">
+      <div id="preview-toolbar">
+        <span id="preview-title">Nothing previewed yet</span>
+        <button id="send-this" disabled>Send this →</button>
+      </div>
+      <div id="preview-wrap">
+        <div id="preview-status" class="placeholder">Pick a newsletter on the left — its content shows here.</div>
+        <div id="paper"><iframe id="preview" sandbox="" title="Content preview"></iframe></div>
+      </div>
+    </section>
+  </main>
+  <dialog id="modal"><div id="modal-content"></div><button id="modal-close" class="ghost">Close</button></dialog>
+  <script src="/static/main.js"></script>
+</body>
+</html>
