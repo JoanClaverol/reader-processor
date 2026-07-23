@@ -8,8 +8,8 @@
 // attachment filename, and a notice matches a send when its text mentions
 // that filename. That way nothing depends on the wording or layout of
 // Amazon's email — only on it quoting the filename at all.
-import { JSDOM } from "jsdom";
 import * as gmail from "./gmail";
+import { textOf } from "./html";
 import * as store from "./store";
 
 const BOUNCE_QUERY =
@@ -104,13 +104,12 @@ export function checkBounces(): Promise<number> {
 async function doCheck(): Promise<number> {
   const g = gmail.gmailClient();
   const ids = await gmail.searchMessageIds(g, BOUNCE_QUERY);
+  const unseen = ids.filter((id) => !store.isBounceProcessed(id));
+  const msgs = await Promise.all(unseen.map((id) => gmail.fetchMessage(g, id)));
   let flipped = 0;
-  for (const id of ids) {
-    if (store.isBounceProcessed(id)) continue;
-    const msg = await gmail.fetchMessage(g, id);
+  for (const msg of msgs) {
     if (AMAZON_FROM.test(msg.sender)) {
-      const text =
-        new JSDOM(msg.html.slice(0, MAX_HTML_CHARS)).window.document.body.textContent ?? "";
+      const text = textOf(msg.html.slice(0, MAX_HTML_CHARS));
       const { flips, code } = noticeFlips(text, msg.date_iso, store.sentRowsWithFilename());
       for (const row of flips) {
         store.updateSentStatus(row.id, "error", `Kindle bounced it: ${code}`);
@@ -118,11 +117,11 @@ async function doCheck(): Promise<number> {
       flipped += flips.length;
       if (flips.length === 0) {
         // Nothing to flip — record the notice itself so it isn't silently lost.
-        store.recordSent(id, "bounce", null, "Kindle bounce notice", "error",
+        store.recordSent(msg.id, "bounce", null, "Kindle bounce notice", "error",
           `No matching send found (${code})`);
       }
     }
-    store.markBounceProcessed(id);
+    store.markBounceProcessed(msg.id);
   }
   return flipped;
 }

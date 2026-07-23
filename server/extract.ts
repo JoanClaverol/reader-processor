@@ -1,5 +1,6 @@
 // Parse newsletter HTML: extract candidate article links, clean bodies.
 import { JSDOM } from "jsdom";
+import { parseHtml, textOfDoc, wordCountOfText } from "./html";
 
 // Substrings in link text that mark navigation/housekeeping, not articles.
 const JUNK_TEXT = [
@@ -92,18 +93,16 @@ export function analyzeNewsletter(html: string, subject = ""): {
   links: ExtractedLink[];
   wordCount: number;
 } {
-  const dom = new JSDOM(html);
-  const doc = dom.window.document;
-  const text = (doc.body?.textContent ?? "").replace(/\s+/g, " ").trim();
+  const doc = parseHtml(html);
   return {
     links: extractLinksFromDoc(doc, subject),
-    wordCount: text ? text.split(" ").length : 0,
+    wordCount: wordCountOfText(textOfDoc(doc)),
   };
 }
 
 /** Return likely-article links, deduplicated, junk flagged (not dropped). */
 export function extractLinks(html: string, subject = ""): ExtractedLink[] {
-  return extractLinksFromDoc(new JSDOM(html).window.document, subject);
+  return extractLinksFromDoc(parseHtml(html), subject);
 }
 
 function extractLinksFromDoc(doc: Document, subject: string): ExtractedLink[] {

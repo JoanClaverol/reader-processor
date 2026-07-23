@@ -1,10 +1,8 @@
 // Word count / reading time, ported from content-collector's stats.ts.
-import { JSDOM } from "jsdom";
+import { textOf, wordCountOfText } from "./html";
 
 export function wordCountOf(html: string): number {
-  const doc = new JSDOM(html).window.document;
-  const text = (doc.body?.textContent ?? "").replace(/\s+/g, " ").trim();
-  return text ? text.split(" ").length : 0;
+  return wordCountOfText(textOf(html));
 }
 
 /** Rough reading time at ~220 wpm. */

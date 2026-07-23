@@ -2,7 +2,8 @@
 // style: prefer a known text-rich content container (keeps ALL text and
 // images), fall back to Mozilla Readability, then clean the result.
 import { Readability } from "@mozilla/readability";
-import { JSDOM, VirtualConsole } from "jsdom";
+import { JSDOM } from "jsdom";
+import { parseHtml, textOf } from "./html";
 
 export const FETCH_HEADERS = {
   "User-Agent":
@@ -168,9 +169,7 @@ export async function fetchArticle(url: string): Promise<Article> {
   if (!ctype.includes("html") && !/^\s*<(!doctype|html)/i.test(body)) {
     throw new FetchError(`not an HTML page (content-type: ${ctype || "unknown"})`);
   }
-  const virtualConsole = new VirtualConsole();
-  const dom = new JSDOM(body, { url: resp.url, virtualConsole });
-  const doc = dom.window.document;
+  const doc = parseHtml(body, resp.url);
 
   let rawHtml: string;
   let title: string;
@@ -188,7 +187,7 @@ export async function fetchArticle(url: string): Promise<Article> {
   }
 
   const html = cleanArticleHtml(rawHtml, resp.url);
-  const textLength = new JSDOM(html).window.document.body.textContent?.trim().length ?? 0;
+  const textLength = textOf(html).trim().length;
   if (textLength < 200) {
     throw new FetchError("extraction produced almost no text (paywall or JS-only page?)");
   }
