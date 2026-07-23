@@ -103,13 +103,14 @@ function encodeSubject(subject: string): string {
     : `=?UTF-8?B?${Buffer.from(subject, "utf8").toString("base64")}?=`;
 }
 
-/** The attachment name a title is sent under — bounce notices quote it back. */
-export function epubFilenameBase(title: string): string {
-  return title.replace(/[^\w\s.-]/g, "").trim().slice(0, 80) || "article";
+function epubFilename(title: string): string {
+  // Trim again after slicing: an 80-char cut can land just past a space.
+  return (title.replace(/[^\w\s.-]/g, "").trim().slice(0, 80).trim() || "article") + ".epub";
 }
 
-export async function sendEpub(g: Gmail, to: string, title: string, epub: Buffer): Promise<void> {
-  const filename = epubFilenameBase(title) + ".epub";
+/** Sends the book and returns the attachment filename it went out under. */
+export async function sendEpub(g: Gmail, to: string, title: string, epub: Buffer): Promise<string> {
+  const filename = epubFilename(title);
   const boundary = "reader-processor-boundary";
   const b64 = epub.toString("base64").replace(/(.{76})/g, "$1\r\n");
   const mime = [
@@ -136,6 +137,7 @@ export async function sendEpub(g: Gmail, to: string, title: string, epub: Buffer
     userId: "me",
     requestBody: { raw: Buffer.from(mime, "utf8").toString("base64url") },
   });
+  return filename;
 }
 
 export async function ensureLabel(g: Gmail, name: string): Promise<string> {

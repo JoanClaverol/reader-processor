@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS sent (
     title TEXT,
     status TEXT NOT NULL,
     detail TEXT,
+    filename TEXT,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS bounces (
@@ -49,6 +50,11 @@ function conn(): Database.Database {
     db.exec(SCHEMA);
     try {
       db.exec("ALTER TABLE articles ADD COLUMN word_count INTEGER");
+    } catch {
+      /* column already exists */
+    }
+    try {
+      db.exec("ALTER TABLE sent ADD COLUMN filename TEXT");
     } catch {
       /* column already exists */
     }
@@ -106,26 +112,31 @@ export function articleWordCounts(): Map<string, number> {
 
 export function recordSent(
   messageId: string, kind: string, url: string | null, title: string,
-  status: string, detail = "",
+  status: string, detail = "", filename: string | null = null,
 ): void {
   conn()
     .prepare(
-      "INSERT INTO sent (message_id, kind, url, title, status, detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO sent (message_id, kind, url, title, status, detail, filename, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .run(messageId, kind, url, title, status, detail, now());
+    .run(messageId, kind, url, title, status, detail, filename, now());
 }
 
 export interface SentRow {
   id: number;
   title: string | null;
   detail: string | null;
+  status: string;
+  filename: string | null;
   created_at: string;
 }
 
-export function sentRowsByStatus(status: string): SentRow[] {
+/** Every log row that went out as an attachment, oldest first. */
+export function sentRowsWithFilename(): SentRow[] {
   return conn()
-    .prepare("SELECT id, title, detail, created_at FROM sent WHERE status = ? ORDER BY id DESC")
-    .all(status) as SentRow[];
+    .prepare(
+      "SELECT id, title, detail, status, filename, created_at FROM sent WHERE filename IS NOT NULL ORDER BY id ASC",
+    )
+    .all() as SentRow[];
 }
 
 export function updateSentStatus(id: number, status: string, detail: string): void {

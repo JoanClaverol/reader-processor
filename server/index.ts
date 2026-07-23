@@ -185,9 +185,9 @@ app.post("/api/send", async (req, res) => {
     const bookTitle = `Reading digest — ${date}`;
     try {
       const epub = await buildEpub(bookTitle, "reader-processor", resolved.map((r) => r.section));
-      await gmail.sendEpub(g, config.kindleEmail, bookTitle, epub);
+      const filename = await gmail.sendEpub(g, config.kindleEmail, bookTitle, epub);
       for (const r of resolved) {
-        store.recordSent(r.item.msg_id, r.item.kind, r.item.url ?? null, r.section.title, "sent", `in "${bookTitle}"`);
+        store.recordSent(r.item.msg_id, r.item.kind, r.item.url ?? null, r.section.title, "sent", `in "${bookTitle}"`, filename);
         touched.add(r.item.msg_id);
         results.push({ title: r.section.title, ok: true, detail: `chapter of "${bookTitle}"` });
       }
@@ -202,8 +202,8 @@ app.post("/api/send", async (req, res) => {
     for (const r of resolved) {
       try {
         const epub = await buildEpub(r.section.title, r.author, [r.section]);
-        await gmail.sendEpub(g, config.kindleEmail, r.section.title, epub);
-        store.recordSent(r.item.msg_id, r.item.kind, r.item.url ?? null, r.section.title, "sent");
+        const filename = await gmail.sendEpub(g, config.kindleEmail, r.section.title, epub);
+        store.recordSent(r.item.msg_id, r.item.kind, r.item.url ?? null, r.section.title, "sent", "", filename);
         touched.add(r.item.msg_id);
         results.push({ title: r.section.title, ok: true, detail: "" });
       } catch (e) {
@@ -221,16 +221,12 @@ app.post("/api/send", async (req, res) => {
   res.json({ results });
 });
 
-app.get("/api/log", async (_req, res) => {
-  try {
-    await checkBounces();
-  } catch {
-    // Offline or not yet authenticated — still show the log we have.
-  }
+app.get("/api/log", (_req, res) => {
   res.json({ entries: store.recentLog() });
 });
 
-// Bounces arrive minutes after a send; keep the log honest between visits.
+// Bounces arrive minutes after a send; the background poll keeps the log
+// honest so /api/log stays a plain local read (never blocks on Gmail).
 const bouncePoll = () => checkBounces().catch(() => {});
 setTimeout(bouncePoll, 5_000);
 setInterval(bouncePoll, 5 * 60 * 1000);
