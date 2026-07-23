@@ -6,6 +6,7 @@ import * as store from "./store";
 import * as gmail from "./gmail";
 import { cleanNewsletterHtml, analyzeNewsletter, domainOf } from "./extract";
 import { fetchArticle, FetchError } from "./fetchArticle";
+import { checkBounces } from "./bounces";
 import { buildEpub, type EpubSection } from "./epub";
 import { minutesFor, wordCountOf } from "./stats";
 
@@ -220,9 +221,19 @@ app.post("/api/send", async (req, res) => {
   res.json({ results });
 });
 
-app.get("/api/log", (_req, res) => {
+app.get("/api/log", async (_req, res) => {
+  try {
+    await checkBounces();
+  } catch {
+    // Offline or not yet authenticated — still show the log we have.
+  }
   res.json({ entries: store.recentLog() });
 });
+
+// Bounces arrive minutes after a send; keep the log honest between visits.
+const bouncePoll = () => checkBounces().catch(() => {});
+setTimeout(bouncePoll, 5_000);
+setInterval(bouncePoll, 5 * 60 * 1000);
 
 const port = Number(process.env.PORT ?? 8377);
 // Loopback only — never reachable from the local network.

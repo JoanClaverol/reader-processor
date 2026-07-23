@@ -71,6 +71,7 @@ export async function buildEpub(
       : "";
     const dom = new JSDOM(`${section.html}\n${sourceNote}`);
     const doc = dom.window.document;
+    stripKindleIncompatible(doc);
     await embedImages(doc, images, oebps, counter);
 
     const serializer = new dom.window.XMLSerializer();
@@ -109,6 +110,32 @@ ${inner}
     mimeType: "application/epub+zip",
     compression: "DEFLATE",
   });
+}
+
+/**
+ * Amazon's Send-to-Kindle converter rejects the whole book (bounce E013)
+ * if any chapter contains media/interactive elements, so convert or drop
+ * them here — last moment before packaging, previews stay untouched.
+ */
+function stripKindleIncompatible(doc: Document): void {
+  doc.querySelectorAll("video").forEach((video) => {
+    const poster = video.getAttribute("poster");
+    if (poster) {
+      const img = doc.createElement("img");
+      img.setAttribute("src", poster);
+      video.replaceWith(img);
+    } else {
+      video.remove();
+    }
+  });
+  doc.querySelectorAll("picture").forEach((picture) => {
+    const img = picture.querySelector("img");
+    if (img) picture.replaceWith(img);
+    else picture.remove();
+  });
+  doc
+    .querySelectorAll("audio, source, canvas, embed, iframe, object, script, svg, form")
+    .forEach((el) => el.remove());
 }
 
 async function embedImages(

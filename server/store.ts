@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS sent (
     detail TEXT,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS bounces (
+    msg_id TEXT PRIMARY KEY,
+    processed_at TEXT NOT NULL
+);
 `;
 
 export interface CachedMessage {
@@ -109,6 +113,33 @@ export function recordSent(
       "INSERT INTO sent (message_id, kind, url, title, status, detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .run(messageId, kind, url, title, status, detail, now());
+}
+
+export interface SentRow {
+  id: number;
+  title: string | null;
+  detail: string | null;
+  created_at: string;
+}
+
+export function sentRowsByStatus(status: string): SentRow[] {
+  return conn()
+    .prepare("SELECT id, title, detail, created_at FROM sent WHERE status = ? ORDER BY id DESC")
+    .all(status) as SentRow[];
+}
+
+export function updateSentStatus(id: number, status: string, detail: string): void {
+  conn().prepare("UPDATE sent SET status = ?, detail = ? WHERE id = ?").run(status, detail, id);
+}
+
+export function isBounceProcessed(msgId: string): boolean {
+  return !!conn().prepare("SELECT 1 FROM bounces WHERE msg_id = ?").get(msgId);
+}
+
+export function markBounceProcessed(msgId: string): void {
+  conn()
+    .prepare("INSERT OR IGNORE INTO bounces (msg_id, processed_at) VALUES (?, ?)")
+    .run(msgId, now());
 }
 
 export function sentKeys(): Set<string> {

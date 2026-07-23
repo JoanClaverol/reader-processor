@@ -42,13 +42,13 @@ export function gmailClient(): Gmail {
   return google.gmail({ version: "v1", auth: getAuth() });
 }
 
-export async function listNewsletterIds(g: Gmail, label: string, daysBack: number): Promise<string[]> {
+export async function searchMessageIds(g: Gmail, q: string): Promise<string[]> {
   const ids: string[] = [];
   let pageToken: string | undefined;
   do {
     const res = await g.users.messages.list({
       userId: "me",
-      q: `label:${label} newer_than:${daysBack}d`,
+      q,
       maxResults: 100,
       pageToken,
     });
@@ -56,6 +56,10 @@ export async function listNewsletterIds(g: Gmail, label: string, daysBack: numbe
     pageToken = res.data.nextPageToken ?? undefined;
   } while (pageToken);
   return ids;
+}
+
+export function listNewsletterIds(g: Gmail, label: string, daysBack: number): Promise<string[]> {
+  return searchMessageIds(g, `label:${label} newer_than:${daysBack}d`);
 }
 
 function collectParts(part: any, mime: string, out: string[]): void {
@@ -99,8 +103,13 @@ function encodeSubject(subject: string): string {
     : `=?UTF-8?B?${Buffer.from(subject, "utf8").toString("base64")}?=`;
 }
 
+/** The attachment name a title is sent under — bounce notices quote it back. */
+export function epubFilenameBase(title: string): string {
+  return title.replace(/[^\w\s.-]/g, "").trim().slice(0, 80) || "article";
+}
+
 export async function sendEpub(g: Gmail, to: string, title: string, epub: Buffer): Promise<void> {
-  const filename = (title.replace(/[^\w\s.-]/g, "").trim().slice(0, 80) || "article") + ".epub";
+  const filename = epubFilenameBase(title) + ".epub";
   const boundary = "reader-processor-boundary";
   const b64 = epub.toString("base64").replace(/(.{76})/g, "$1\r\n");
   const mime = [
