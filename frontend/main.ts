@@ -18,6 +18,8 @@ const emailList = $("email-list");
 const itemsPane = $("items");
 const previewFrame = $<HTMLIFrameElement>("preview");
 const previewStatus = $("preview-status");
+const previewStatusText = $("preview-status-text");
+const previewSpinner = previewStatus.querySelector(".spinner") as HTMLElement;
 const previewTitle = $("preview-title");
 const sendThisBtn = $<HTMLButtonElement>("send-this");
 const sendBtn = $<HTMLButtonElement>("send-btn");
@@ -260,7 +262,7 @@ function itemRow(
   if (opts.sent) {
     const mark = document.createElement("span");
     mark.className = "sent-mark";
-    mark.textContent = " · ✓ sent";
+    mark.textContent = "✓ sent";
     meta.appendChild(mark);
   }
   main.appendChild(title);
@@ -286,19 +288,42 @@ function markPreviewing(): void {
 
 // ---------- preview (right column) ----------
 
+// Dark reading mode: invert the iframe document's luminance (hue-rotate keeps
+// colors roughly natural); images get a second inversion to look normal.
+const darkToggle = $<HTMLButtonElement>("dark-toggle");
+let darkReading = localStorage.getItem("darkReading") === "1";
+
+function renderDarkToggle(): void {
+  darkToggle.classList.toggle("active", darkReading);
+  darkToggle.setAttribute("aria-pressed", String(darkReading));
+}
+
+function toggleDarkReading(): void {
+  darkReading = !darkReading;
+  localStorage.setItem("darkReading", darkReading ? "1" : "0");
+  renderDarkToggle();
+  if (currentPreview) previewItem(currentPreview); // re-wrap current content
+}
+
+darkToggle.addEventListener("click", toggleDarkReading);
+renderDarkToggle();
+
 let previewToken = 0;
 
-function showPreviewStatus(text: string): void {
-  previewStatus.textContent = text;
+function showPreviewStatus(text: string, loading = true): void {
+  previewStatusText.textContent = text;
+  previewSpinner.classList.toggle("hidden", !loading);
   previewStatus.classList.remove("hidden");
   previewFrame.classList.add("loading");
 }
 
 function showPreviewHtml(title: string, html: string): void {
-  previewFrame.srcdoc = `<!doctype html><html><head><meta charset="utf-8">
+  previewFrame.srcdoc = `<!doctype html><html${darkReading ? ' class="dark"' : ""}><head><meta charset="utf-8">
     <style>body{font-family:Georgia,serif;max-width:640px;margin:1.5rem auto;padding:0 1.2rem 3rem;
     line-height:1.55;color:#111;background:#fff} img{max-width:100%;height:auto}
-    a{color:#2563eb}</style>
+    a{color:#2563eb}
+    html.dark{filter:invert(1) hue-rotate(180deg);background:#fff}
+    html.dark img,html.dark video{filter:invert(1) hue-rotate(180deg)}</style>
     </head><body>${html}</body></html>`;
   previewStatus.classList.add("hidden");
   previewFrame.classList.remove("loading");
@@ -325,7 +350,7 @@ async function previewItem(item: SelItem): Promise<void> {
     }
     if (token !== previewToken) return; // a newer preview superseded this one
     if (!ok || data.html === undefined) {
-      showPreviewStatus(`⚠️ Could not render this newsletter: ${data.error ?? "server error"}`);
+      showPreviewStatus(`⚠️ Could not render this newsletter: ${data.error ?? "server error"}`, false);
       return;
     }
     showPreviewHtml(data.title ?? item.title, data.html);
@@ -335,7 +360,7 @@ async function previewItem(item: SelItem): Promise<void> {
     const data = await resp.json();
     if (token !== previewToken) return;
     if (!resp.ok) {
-      showPreviewStatus(`⚠️ Could not extract this article: ${data.error}`);
+      showPreviewStatus(`⚠️ Could not extract this article: ${data.error}`, false);
       return;
     }
     showPreviewHtml(data.title, `<h2>${escapeHtml(data.title)}</h2>${data.html}`);
@@ -349,29 +374,104 @@ bundleCb.checked = localStorage.getItem("bundleMode") === "1";
 bundleCb.addEventListener("change", () =>
   localStorage.setItem("bundleMode", bundleCb.checked ? "1" : "0"));
 
+const sendProgress = $("send-progress");
+const sendProgressFill = $("send-progress-fill");
+
+function progressStart(indeterminate: boolean): void {
+  sendProgress.classList.remove("hidden");
+  sendProgress.classList.toggle("indeterminate", indeterminate);
+  sendProgressFill.style.width = indeterminate ? "" : "0%";
+}
+function progressSet(done: number, total: number): void {
+  sendProgressFill.style.width = `${(done / total) * 100}%`;
+}
+function progressEnd(): void {
+  sendProgress.classList.add("hidden");
+  sendProgress.classList.remove("indeterminate");
+  sendProgressFill.style.width = "0%";
+}
+
+async function postSend(items: SelItem[], bundle: boolean): Promise<SendResult[]> {
+  const resp = await fetch("/api/send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      items: items.map(({ kind, msg_id, url }) => ({ kind, msg_id, url })),
+      bundle,
+    }),
+  });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.error ?? "server error");
+  return data.results as SendResult[];
+}
+
 async function sendItems(items: SelItem[]): Promise<void> {
   if (items.length === 0) return;
   sendBtn.disabled = true;
   sendThisBtn.disabled = true;
-  sendCount.textContent = "…";
+
+  const bundled = bundleCb.checked && items.length > 1;
+  const results: SendResult[] = [];
+  progressStart(bundled);
+  sendCount.textContent = bundled ? "…" : `0/${items.length}`;
   try {
-    const resp = await fetch("/api/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        items: items.map(({ kind, msg_id, url }) => ({ kind, msg_id, url })),
-        bundle: bundleCb.checked && items.length > 1,
-      }),
-    });
-    const data = await resp.json();
-    showResults(data.results as SendResult[]);
-    for (const item of items) selected.delete(selKey(item.kind, item.msg_id, item.url));
-    await loadNewsletters();
-  } catch (e) {
-    showResults([{ title: "Send failed", ok: false, detail: String(e) }]);
+    if (bundled) {
+      // One book = one request; nothing granular to report until it lands.
+      try {
+        results.push(...await postSend(items, true));
+      } catch (e) {
+        results.push({ title: "Bundled digest", ok: false, detail: String(e) });
+      }
+    } else {
+      // Sequential per-item sends — same emails the server would send for a
+      // batch, but each completed item can advance the progress bar.
+      let done = 0;
+      for (const item of items) {
+        try {
+          results.push(...await postSend([item], false));
+        } catch (e) {
+          results.push({ title: item.title, ok: false, detail: String(e) });
+        }
+        done++;
+        progressSet(done, items.length);
+        sendCount.textContent = `${done}/${items.length}`;
+      }
+    }
+  } finally {
+    progressEnd();
   }
+
+  showSendToast(results);
+  for (const item of items) selected.delete(selKey(item.kind, item.msg_id, item.url));
+  await loadNewsletters();
   updateSendBtn();
   sendThisBtn.disabled = currentPreview === null;
+}
+
+function showSendToast(results: SendResult[]): void {
+  const fails = results.filter((r) => !r.ok);
+  const okCount = results.length - fails.length;
+  const allOk = fails.length === 0;
+  const toast = document.createElement("div");
+  toast.className = "toast";
+  toast.innerHTML = `
+    <div class="toast-title"><span class="${allOk ? "ok" : "fail"}">${allOk ? "✓" : "✗"}</span>
+      <span>${allOk
+        ? `${okCount} item${okCount === 1 ? "" : "s"} sent to Kindle`
+        : `${okCount} sent · ${fails.length} failed`}</span></div>
+    ${allOk ? "" : `<ul class="toast-fails">${fails.map((f) => `<li>${escapeHtml(f.title)}</li>`).join("")}</ul>`}
+    <div class="toast-actions"><button class="ghost toast-details">Details</button></div>`;
+  let dismissed = false;
+  const dismiss = (): void => {
+    if (dismissed) return;
+    dismissed = true;
+    toast.classList.add("leaving");
+    setTimeout(() => toast.remove(), 220);
+  };
+  (toast.querySelector(".toast-details") as HTMLButtonElement)
+    .addEventListener("click", () => { dismiss(); showResults(results); });
+  $("toasts").appendChild(toast);
+  setTimeout(dismiss, 6000);
 }
 
 sendBtn.addEventListener("click", () => sendItems([...selected.values()]));
@@ -457,8 +557,78 @@ document.addEventListener("keydown", (e) => {
       else if (currentPreview) sendItems([currentPreview]);
       break;
     }
+    case "d": case "D": {
+      e.preventDefault();
+      toggleDarkReading();
+      break;
+    }
   }
 });
+
+// ---------- resizable panes ----------
+
+interface PaneSpec {
+  varName: string; colId: string; resizerId: string; storageKey: string;
+  min: number; max: number; def: number;
+}
+const panes: PaneSpec[] = [
+  { varName: "--email-col-w", colId: "email-list", resizerId: "resizer-emails",
+    storageKey: "colW-emails", min: 220, max: 480, def: 300 },
+  { varName: "--items-col-w", colId: "items-col", resizerId: "resizer-items",
+    storageKey: "colW-items", min: 240, max: 520, def: 330 },
+];
+
+function initResizers(): void {
+  const root = document.documentElement;
+  for (const p of panes) {
+    const col = $(p.colId);
+    const resizer = $(p.resizerId);
+    const clamp = (w: number): number => Math.min(Math.max(w, p.min), p.max);
+    const apply = (w: number): void => {
+      root.style.setProperty(p.varName, `${Math.round(w)}px`);
+    };
+
+    // Restore saved width / collapsed state.
+    const saved = localStorage.getItem(p.storageKey);
+    if (saved === "collapsed") col.classList.add("collapsed");
+    else if (saved !== null && !Number.isNaN(Number(saved))) apply(clamp(Number(saved)));
+
+    resizer.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const wasCollapsed = col.classList.contains("collapsed");
+      const startX = e.clientX;
+      const startW = wasCollapsed ? p.def : col.getBoundingClientRect().width;
+      resizer.classList.add("dragging");
+      document.body.classList.add("resizing");
+      resizer.setPointerCapture(e.pointerId);
+
+      const onMove = (ev: PointerEvent): void => {
+        if (wasCollapsed) col.classList.remove("collapsed");
+        apply(clamp(startW + ev.clientX - startX));
+      };
+      const onUp = (): void => {
+        resizer.classList.remove("dragging");
+        document.body.classList.remove("resizing");
+        resizer.removeEventListener("pointermove", onMove);
+        resizer.removeEventListener("pointerup", onUp);
+        if (!col.classList.contains("collapsed")) {
+          localStorage.setItem(p.storageKey, String(Math.round(col.getBoundingClientRect().width)));
+        }
+      };
+      resizer.addEventListener("pointermove", onMove);
+      resizer.addEventListener("pointerup", onUp);
+    });
+
+    resizer.addEventListener("dblclick", () => {
+      const collapsed = col.classList.toggle("collapsed");
+      localStorage.setItem(
+        p.storageKey,
+        collapsed ? "collapsed" : String(Math.round(col.getBoundingClientRect().width)),
+      );
+    });
+  }
+}
 
 // ---------- log ----------
 
@@ -476,4 +646,5 @@ $("log-btn").addEventListener("click", async () => {
 
 $("modal-close").addEventListener("click", () => modal.close());
 
+initResizers();
 loadNewsletters();

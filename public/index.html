@@ -8,34 +8,43 @@
 </head>
 <body>
   <header>
-    <h1>📬 reader-processor</h1>
+    <h1><span class="logo-glyph">📬</span> reader-processor</h1>
     <div class="header-actions">
-      <span id="kbd-hint">↑↓ navigate · ⇥ switch pane · space select · ↵ preview · S send</span>
-      <label id="bundle-toggle" title="Combine everything selected into one book with chapters">
-        <input type="checkbox" id="bundle-cb"> 📚 One book
+      <span id="kbd-hint"><kbd>↑</kbd><kbd>↓</kbd> navigate · <kbd>⇥</kbd> pane · <kbd>space</kbd> select · <kbd>↵</kbd> preview · <kbd>S</kbd> send · <kbd>D</kbd> dark</span>
+      <label id="bundle-toggle" class="switch" title="Combine everything selected into one book with chapters">
+        <input type="checkbox" id="bundle-cb">
+        <span class="switch-track" aria-hidden="true"></span>
+        <span class="switch-label">One book</span>
       </label>
       <button id="log-btn" class="ghost">Log</button>
-      <button id="send-btn" disabled>Send <span id="send-count">0</span> to Kindle</button>
+      <button id="send-btn" disabled>Send <span id="send-count" class="count-badge">0</span> to Kindle</button>
     </div>
+    <div id="send-progress" class="hidden"><div id="send-progress-fill"></div></div>
   </header>
   <main>
     <aside id="email-list" class="col" aria-label="Newsletters">
       <div class="placeholder">Loading newsletters…</div>
     </aside>
+    <div class="col-resizer" id="resizer-emails" title="Drag to resize · double-click to collapse"></div>
     <section id="items-col" class="col">
       <div id="items" class="col-scroll"><div class="placeholder">Select a newsletter.</div></div>
     </section>
+    <div class="col-resizer" id="resizer-items" title="Drag to resize · double-click to collapse"></div>
     <section id="preview-col">
       <div id="preview-toolbar">
         <span id="preview-title">Nothing previewed yet</span>
-        <button id="send-this" disabled>Send this →</button>
+        <div class="toolbar-actions">
+          <button id="dark-toggle" class="ghost icon-btn" title="Dark reading mode (D)" aria-pressed="false">🌙</button>
+          <button id="send-this" class="ghost-accent" disabled>Send this →</button>
+        </div>
       </div>
       <div id="preview-wrap">
-        <div id="preview-status" class="placeholder">Pick a newsletter on the left — its content shows here.</div>
+        <div id="preview-status" class="placeholder"><span class="spinner hidden"></span><span id="preview-status-text">Pick a newsletter on the left — its content shows here.</span></div>
         <div id="paper"><iframe id="preview" sandbox="" title="Content preview"></iframe></div>
       </div>
     </section>
   </main>
+  <div id="toasts" aria-live="polite"></div>
   <dialog id="modal"><div id="modal-content"></div><button id="modal-close" class="ghost">Close</button></dialog>
   <script src="/static/main.js"></script>
 </body>

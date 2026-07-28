@@ -66,9 +66,11 @@ Tick the newsletters/links you want, hit send.
 Sent items are marked ✓, the source email gets a `kindle-sent` label in Gmail,
 and `/log` shows the send history (stored in the `data/` SQLite db).
 
-The UI is two panes: newsletters on the left, a preview of the selected
-content on the right. Click a newsletter to preview its body; click a link to
-fetch and preview the article behind it. Tick checkboxes and send in batch.
+The UI is three columns: newsletters, the selected newsletter's items, and a
+preview of the selected content. Click a newsletter to preview its body; click
+a link to fetch and preview the article behind it. Tick checkboxes and send in
+batch. Drag the column dividers to resize (double-click to collapse), and
+watch send progress in the bar under the header.
 
 ## Where things live
 
