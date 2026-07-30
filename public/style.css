@@ -291,14 +291,18 @@ body.resizing .col { transition: none; }
 /* ---------- dialog ---------- */
 dialog {
   border: 1px solid var(--border-strong); border-radius: var(--r-lg);
-  max-width: 580px; width: 90%; max-height: 70vh; overflow-y: auto;
+  max-width: 580px; width: 90%; max-height: 70vh;
   background: var(--bg-1); color: var(--text-1);
   box-shadow: var(--shadow-2); padding: 1.2rem 1.3rem;
 }
+/* Only the content scrolls; the Close button stays pinned below it.
+   [open] so the UA's display:none still applies when closed. */
+dialog[open] { display: flex; flex-direction: column; }
+#modal-content { overflow-y: auto; }
 dialog::backdrop { background: #00000090; backdrop-filter: blur(3px); }
 dialog h3 { margin: 0 0 .7rem; font-size: .95rem; font-weight: 650; }
 dialog table { border-collapse: collapse; width: 100%; font-size: .86rem; }
 dialog td { padding: .4rem .5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
 dialog td small { color: var(--text-3); }
-dialog #modal-close { margin-top: .9rem; }
+dialog #modal-close { margin-top: .9rem; align-self: flex-start; }
 .ok { color: var(--ok); } .fail { color: var(--fail); }

@@ -646,5 +646,19 @@ $("log-btn").addEventListener("click", async () => {
 
 $("modal-close").addEventListener("click", () => modal.close());
 
+// Close on backdrop click. Backdrop hits target the <dialog> itself with
+// coordinates outside its box; requiring the press to start there too keeps a
+// text-selection drag that ends outside the dialog from dismissing it.
+const onBackdrop = (e: MouseEvent): boolean => {
+  if (e.target !== modal) return false;
+  const r = modal.getBoundingClientRect();
+  return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+};
+let pressedBackdrop = false;
+modal.addEventListener("pointerdown", (e) => { pressedBackdrop = onBackdrop(e); });
+modal.addEventListener("click", (e) => {
+  if (pressedBackdrop && onBackdrop(e)) modal.close();
+});
+
 initResizers();
 loadNewsletters();
