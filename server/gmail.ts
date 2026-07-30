@@ -110,6 +110,10 @@ function epubFilename(title: string): string {
 
 /** Sends the book and returns the attachment filename it went out under. */
 export async function sendEpub(g: Gmail, to: string, title: string, epub: Buffer): Promise<string> {
+  // Scraped titles can carry newlines; raw CR/LF here would be spliced into
+  // the MIME headers below, truncating the attachment filename mid-header
+  // (Kindle then bounces E001) and opening header injection.
+  title = title.replace(/\s+/g, " ").trim();
   const filename = epubFilename(title);
   const boundary = "reader-processor-boundary";
   const b64 = epub.toString("base64").replace(/(.{76})/g, "$1\r\n");

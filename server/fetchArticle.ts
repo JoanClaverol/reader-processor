@@ -191,5 +191,7 @@ export async function fetchArticle(url: string): Promise<Article> {
   if (textLength < 200) {
     throw new FetchError("extraction produced almost no text (paywall or JS-only page?)");
   }
-  return { url: resp.url, title: title || url, html };
+  // A scraped <h1> can span nested elements (banners, badges), yielding a
+  // multi-line textContent; collapse it so titles are always one line.
+  return { url: resp.url, title: (title || url).replace(/\s+/g, " ").trim(), html };
 }

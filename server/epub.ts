@@ -4,6 +4,7 @@
 import JSZip from "jszip";
 import { JSDOM } from "jsdom";
 import { randomUUID } from "crypto";
+import sharp from "sharp";
 import { FETCH_HEADERS } from "./fetchArticle";
 
 const BOOK_CSS = `
@@ -136,6 +137,79 @@ function stripKindleIncompatible(doc: Document): void {
   doc
     .querySelectorAll("audio, source, canvas, embed, iframe, object, script, svg, form")
     .forEach((el) => el.remove());
+  // Amazon's converter crashes (E999) when an attribute value contains '>'
+  // and other attributes follow it — even as the legal XHTML entity &gt;;
+  // its tokenizer apparently decodes entities before splitting tags.
+  // Diagnosed 2026-07-28 from alt="… > Card Image" on an OpenAI article.
+  doc.querySelectorAll("*").forEach((el) => {
+    for (const attr of [...el.attributes]) {
+      if (/[<>]/.test(attr.value)) {
+        el.setAttribute(attr.name, attr.value.replace(/[<>]/g, " ").replace(/\s+/g, " ").trim());
+      }
+    }
+  });
+}
+
+// Precautionary: the largest Kindle screen is 1860×2480, so anything
+// bigger only bloats the book and stresses Amazon's converter.
+const MAX_EDGE_PX = 1800;
+
+/**
+ * Amazon documents JPEG/PNG/GIF/BMP as the supported doc image formats,
+ * and progressive-scan JPEG demonstrably bounces the book with E013
+ * (2026-07-28, Substack CDN serves fl_progressive:steep). Pass through
+ * baseline JPEG/PNG/GIF untouched and re-encode everything else (WebP,
+ * SVG, progressive JPEG, oversized) — JPEG if opaque, PNG if it has
+ * alpha, downscaled to fit MAX_EDGE_PX. SVG conveniently rasterizes.
+ * Returns null for images sharp can't decode; the caller drops those
+ * like unfetchable ones.
+ */
+async function kindleSafeImage(
+  buf: Buffer, ct: string,
+): Promise<{ buf: Buffer; mediaType: string; ext: string } | null> {
+  try {
+    const meta = await sharp(buf).metadata();
+    const fits = (meta.width ?? Infinity) <= MAX_EDGE_PX && (meta.height ?? Infinity) <= MAX_EDGE_PX;
+    if (fits) {
+      if (ct === "image/gif") return { buf, mediaType: "image/gif", ext: "gif" };
+      if (ct === "image/png") return { buf, mediaType: "image/png", ext: "png" };
+      if (ct === "image/jpeg" && !isProgressiveJpeg(buf)) {
+        return { buf, mediaType: "image/jpeg", ext: "jpg" };
+      }
+    }
+    const img = sharp(buf).resize({
+      width: MAX_EDGE_PX, height: MAX_EDGE_PX,
+      fit: "inside", withoutEnlargement: true,
+    });
+    if (meta.hasAlpha) {
+      return { buf: await img.png().toBuffer(), mediaType: "image/png", ext: "png" };
+    }
+    return {
+      buf: await img.jpeg({ quality: 88, progressive: false }).toBuffer(),
+      mediaType: "image/jpeg",
+      ext: "jpg",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isProgressiveJpeg(buf: Buffer): boolean {
+  if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return false;
+  let i = 2;
+  while (i + 3 < buf.length) {
+    if (buf[i] !== 0xff) return false; // lost marker alignment — assume not
+    const marker = buf[i + 1];
+    if (marker === 0xff) { i++; continue; } // fill byte
+    if (marker === 0xc2) return true; // SOF2: progressive DCT
+    if (marker === 0xc0 || marker === 0xc1) return false; // baseline/extended
+    if (marker === 0xda) return false; // scan data starts, no SOF2 seen
+    if (marker >= 0xd0 && marker <= 0xd9) { i += 2; continue; } // bare marker
+    const len = buf.readUInt16BE(i + 2);
+    if (len < 2) return false;
+    i += 2 + len;
+  }
+  return false;
 }
 
 async function embedImages(
@@ -162,13 +236,14 @@ async function embedImages(
           signal: AbortSignal.timeout(20_000),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const buf = Buffer.from(await res.arrayBuffer());
+        const raw = Buffer.from(await res.arrayBuffer());
         const ct = (res.headers.get("content-type") ?? "").split(";")[0].trim();
-        if (!ct.startsWith("image/") || buf.length > MAX_IMAGE_BYTES) throw new Error("unusable");
-        const { ext, mediaType } = imageType(ct, src);
-        const path = `images/img${pad(++counter.n)}.${ext}`;
-        oebps.file(path, buf);
-        rec = { path, mediaType };
+        if (!ct.startsWith("image/") || raw.length > MAX_IMAGE_BYTES) throw new Error("unusable");
+        const safe = await kindleSafeImage(raw, ct);
+        if (!safe) throw new Error("unusable");
+        const path = `images/img${pad(++counter.n)}.${safe.ext}`;
+        oebps.file(path, safe.buf);
+        rec = { path, mediaType: safe.mediaType };
         images.set(src, rec);
       } catch {
         img.remove(); // drop images we can't fetch rather than break the book
@@ -251,24 +326,6 @@ function buildNcx(title: string, uuid: string, chapters: ChapterMeta[]): string 
 ${points}
   </navMap>
 </ncx>`;
-}
-
-function imageType(contentType: string, url: string): { ext: string; mediaType: string } {
-  const byCt: Record<string, string> = {
-    "image/png": "png",
-    "image/jpeg": "jpg",
-    "image/gif": "gif",
-    "image/svg+xml": "svg",
-    "image/webp": "webp",
-  };
-  if (contentType && byCt[contentType]) return { ext: byCt[contentType], mediaType: contentType };
-  const m = url.split("?")[0].match(/\.(png|jpe?g|gif|svg|webp)$/i);
-  const ext = (m ? m[1].toLowerCase() : "jpg").replace("jpeg", "jpg");
-  const ctByExt: Record<string, string> = {
-    png: "image/png", jpg: "image/jpeg", gif: "image/gif",
-    svg: "image/svg+xml", webp: "image/webp",
-  };
-  return { ext, mediaType: ctByExt[ext] ?? "image/jpeg" };
 }
 
 const pad = (n: number) => String(n).padStart(3, "0");
