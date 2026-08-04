@@ -5,7 +5,8 @@ import { loadConfig, ROOT, type Config } from "./config";
 import * as store from "./store";
 import * as gmail from "./gmail";
 import { cleanNewsletterHtml, analyzeNewsletter, domainOf } from "./extract";
-import { fetchArticle, FetchError } from "./fetchArticle";
+import { fetchArticle, cleanArticleHtml, resolveFinalUrl, FetchError } from "./fetchArticle";
+import { textOf, wordCountOfText } from "./html";
 import { checkBounces } from "./bounces";
 import { buildEpub, type EpubSection } from "./epub";
 import { minutesFor, wordCountOf } from "./stats";
@@ -35,7 +36,8 @@ app.use((req, res, next) => {
   }
   next();
 });
-app.use(express.json());
+// A pasted article arrives as one JSON body, well past the 100kb default.
+app.use(express.json({ limit: "8mb" }));
 
 const STATIC_DIR = path.join(ROOT, "public");
 app.use("/static", express.static(STATIC_DIR));
@@ -130,8 +132,45 @@ app.get("/api/preview/article", async (req, res) => {
     res.json({ title: article.title, html: article.html, url: article.url });
   } catch (e) {
     const status = e instanceof FetchError ? 502 : 500;
-    res.status(status).json({ error: String((e as Error).message ?? e) });
+    res.status(status).json({
+      error: String((e as Error).message ?? e),
+      // Lets the dashboard offer the paste dialog only where it can help.
+      pasteable: e instanceof FetchError && e.pasteable,
+    });
   }
+});
+
+// A bot-walled article can still be read in the user's own browser. Accept a
+// paste of what they see there into the same cache a successful fetch fills,
+// so preview and send treat it like any other article from then on.
+app.post("/api/article/paste", async (req, res) => {
+  const url = String(req.body?.url ?? "");
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return res.status(400).json({ error: "not a valid URL" });
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return res.status(400).json({ error: "URL must be http(s)" });
+  }
+  // Resolve first: a newsletter shortcode must not end up as the article's
+  // host, or the EPUB credits the tracker and relative images resolve there.
+  const finalUrl = await resolveFinalUrl(url);
+  const html = cleanArticleHtml(String(req.body?.html ?? ""), finalUrl);
+  // One text extraction feeds both the length check and the word count: each
+  // is a full synchronous parse, and this body can be megabytes.
+  const text = textOf(html).trim();
+  if (text.length < 200) {
+    return res
+      .status(400)
+      .json({ error: "pasted content is too short — needs at least 200 characters of text" });
+  }
+  const title =
+    String(req.body?.title ?? "").replace(/\s+/g, " ").trim() || domainOf(finalUrl);
+  // Keyed by the URL the dashboard asked for, so preview and send find it.
+  store.putArticle(url, finalUrl, title, html, wordCountOfText(text));
+  res.json({ title, url: finalUrl });
 });
 
 interface SendItem {

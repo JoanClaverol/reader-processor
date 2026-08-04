@@ -57,8 +57,30 @@ const selKey = (kind: string, msgId: string, url?: string) =>
   kind === "body" ? `body:${msgId}` : `link:${msgId}:${url}`;
 const isProcessed = (nl: Newsletter) => nl.body_sent || nl.links.some((l) => l.sent);
 
+// Quotes included: newsletter-controlled titles and URLs reach attribute
+// values (the paste dialog), where escaping only < and > lets a crafted link
+// break out of the value and run script in the dashboard's own origin.
 function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+/**
+ * Read a JSON response, tolerating the HTML error pages Express emits for an
+ * oversized body or an unhandled throw. Without this the user is shown
+ * "Unexpected token '<'" instead of what actually went wrong.
+ */
+async function readJson(resp: Response): Promise<Record<string, any>> {
+  const text = await resp.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {
+      error: resp.status === 413
+        ? "that paste is too large (over 8 MB) — try selecting less of the page"
+        : `server error (HTTP ${resp.status})`,
+    };
+  }
 }
 
 function updateSendBtn(): void {
@@ -308,11 +330,36 @@ function toggleDarkReading(): void {
 darkToggle.addEventListener("click", toggleDarkReading);
 renderDarkToggle();
 
+// Set by a dialog holding unsaved input; returns false to veto the close.
+// Every close path routes through tryCloseModal (or the "cancel" handler for
+// Esc), so a read-only dialog just leaves this null.
+let closeGuard: (() => boolean) | null = null;
+
+function tryCloseModal(): void {
+  if (closeGuard && !closeGuard()) return;
+  closeGuard = null;
+  modal.close();
+}
+
 let previewToken = 0;
 
-function showPreviewStatus(text: string, loading = true): void {
+// An action button lives beside the status text only while that status is up.
+let statusAction: HTMLButtonElement | null = null;
+
+function showPreviewStatus(
+  text: string, loading = true, action?: { label: string; run: () => void },
+): void {
   previewStatusText.textContent = text;
   previewSpinner.classList.toggle("hidden", !loading);
+  statusAction?.remove();
+  statusAction = null;
+  if (action) {
+    statusAction = document.createElement("button");
+    statusAction.className = "ghost-accent";
+    statusAction.textContent = action.label;
+    statusAction.addEventListener("click", action.run);
+    previewStatus.appendChild(statusAction);
+  }
   previewStatus.classList.remove("hidden");
   previewFrame.classList.add("loading");
 }
@@ -325,8 +372,68 @@ function showPreviewHtml(title: string, html: string): void {
     html.dark{filter:invert(1) hue-rotate(180deg);background:#fff}
     html.dark img,html.dark video{filter:invert(1) hue-rotate(180deg)}</style>
     </head><body>${html}</body></html>`;
+  statusAction?.remove();
+  statusAction = null;
   previewStatus.classList.add("hidden");
   previewFrame.classList.remove("loading");
+}
+
+/**
+ * Bot-walled sites only open in a real browser, so let the user paste what they
+ * see there. A contenteditable rather than a textarea, because the clipboard
+ * carries HTML: paragraphs, links and images survive the trip.
+ */
+function openPasteDialog(item: SelItem): void {
+  modalContent.innerHTML = `<h3>Paste article</h3>
+    <p class="paste-hint">Open
+      <a href="${escapeHtml(item.url!)}" target="_blank" rel="noreferrer noopener">the article</a>
+      in your browser, select all of it (⌘A) and paste it below (⌘V).</p>
+    <input id="paste-title" type="text" placeholder="Title" value="${escapeHtml(item.title)}">
+    <div id="paste-body" contenteditable="true" role="textbox" aria-label="Article content"></div>
+    <div class="paste-actions">
+      <span id="paste-error" class="fail"></span>
+      <button id="paste-save">Save article</button>
+    </div>`;
+
+  // Resolved once, up front: re-querying after the await would hit whatever
+  // replaced the dialog's contents in the meantime.
+  const bodyEl = $("paste-body");
+  const titleEl = $<HTMLInputElement>("paste-title");
+  const errorEl = $("paste-error");
+  const saveBtn = $<HTMLButtonElement>("paste-save");
+  let saved = false;
+
+  // This is the app's only data-entry surface, and the dialog is deliberately
+  // easy to dismiss — don't let a stray Esc bin a long manual paste.
+  closeGuard = () =>
+    saved || !bodyEl.textContent?.trim() || confirm("Discard the article you pasted?");
+
+  modal.showModal();
+  bodyEl.focus();
+
+  saveBtn.addEventListener("click", async () => {
+    saveBtn.disabled = true;
+    errorEl.textContent = "";
+    try {
+      const resp = await fetch("/api/article/paste", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          url: item.url,
+          title: titleEl.value,
+          html: bodyEl.innerHTML,
+        }),
+      });
+      const data = await readJson(resp);
+      if (!resp.ok) throw new Error(data.error ?? "server error");
+      saved = true;
+      tryCloseModal();
+      previewItem({ ...item, title: data.title }); // now served from the cache
+    } catch (e) {
+      errorEl.textContent = String((e as Error).message ?? e);
+      saveBtn.disabled = false;
+    }
+  });
 }
 
 async function previewItem(item: SelItem): Promise<void> {
@@ -356,14 +463,27 @@ async function previewItem(item: SelItem): Promise<void> {
     showPreviewHtml(data.title ?? item.title, data.html);
   } else {
     showPreviewStatus("Fetching article…");
-    const resp = await fetch(`/api/preview/article?url=${encodeURIComponent(item.url!)}`);
-    const data = await resp.json();
+    let data: { title?: string; html?: string; error?: string; pasteable?: boolean };
+    let ok: boolean;
+    try {
+      const resp = await fetch(`/api/preview/article?url=${encodeURIComponent(item.url!)}`);
+      ok = resp.ok;
+      data = await readJson(resp);
+    } catch (e) {
+      // A dropped connection must not leave the pane stuck on "Fetching…".
+      ok = false;
+      data = { error: String((e as Error).message ?? e) };
+    }
     if (token !== previewToken) return;
-    if (!resp.ok) {
-      showPreviewStatus(`⚠️ Could not extract this article: ${data.error}`, false);
+    if (!ok || data.html === undefined) {
+      showPreviewStatus(
+        `⚠️ Could not extract this article: ${data.error ?? "server error"}`, false,
+        data.pasteable ? { label: "Paste article…", run: () => openPasteDialog(item) } : undefined,
+      );
       return;
     }
-    showPreviewHtml(data.title, `<h2>${escapeHtml(data.title)}</h2>${data.html}`);
+    const title = data.title ?? item.title;
+    showPreviewHtml(title, `<h2>${escapeHtml(title)}</h2>${data.html}`);
   }
 }
 
@@ -484,6 +604,7 @@ function showResults(results: SendResult[]): void {
     <tr><td class="${r.ok ? "ok" : "fail"}">${r.ok ? "✓" : "✗"}</td>
     <td>${escapeHtml(r.title)}${r.ok ? "" : `<br><small>${escapeHtml(r.detail)}</small>`}</td></tr>`);
   modalContent.innerHTML = `<h3>Send results</h3><table>${rows.join("")}</table>`;
+  closeGuard = null; // this content replaced whatever the guard was protecting
   modal.showModal();
 }
 
@@ -641,10 +762,17 @@ $("log-btn").addEventListener("click", async () => {
     <td>${e.created_at.replace("T", " ")}</td><td>${e.kind}</td>
     <td>${escapeHtml(e.title)}${e.detail ? `<br><small>${escapeHtml(e.detail)}</small>` : ""}</td></tr>`);
   modalContent.innerHTML = `<h3>Send log</h3><table>${rows.join("") || "<tr><td>Nothing sent yet.</td></tr>"}</table>`;
+  closeGuard = null; // this content replaced whatever the guard was protecting
   modal.showModal();
 });
 
-$("modal-close").addEventListener("click", () => modal.close());
+$("modal-close").addEventListener("click", () => tryCloseModal());
+
+// Esc reaches the dialog directly, bypassing tryCloseModal.
+modal.addEventListener("cancel", (e) => {
+  if (closeGuard && !closeGuard()) e.preventDefault();
+  else closeGuard = null;
+});
 
 // Close on backdrop click. Backdrop hits target the <dialog> itself with
 // coordinates outside its box; requiring the press to start there too keeps a
@@ -657,7 +785,7 @@ const onBackdrop = (e: MouseEvent): boolean => {
 let pressedBackdrop = false;
 modal.addEventListener("pointerdown", (e) => { pressedBackdrop = onBackdrop(e); });
 modal.addEventListener("click", (e) => {
-  if (pressedBackdrop && onBackdrop(e)) modal.close();
+  if (pressedBackdrop && onBackdrop(e)) tryCloseModal();
 });
 
 initResizers();

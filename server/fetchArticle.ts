@@ -31,7 +31,79 @@ const JUNK_SELECTORS = [
   ".screen-reader-text",
 ].join(",");
 
-export class FetchError extends Error {}
+export class FetchError extends Error {
+  /**
+   * Whether hand-pasting the page would actually get around this. False for a
+   * bad URL, a PDF, or a timeout — offering the paste dialog there just sends
+   * the user off to do work that cannot help.
+   */
+  readonly pasteable: boolean;
+  constructor(message: string, pasteable = false) {
+    super(message);
+    this.pasteable = pasteable;
+  }
+}
+
+/**
+ * The site answered with a bot wall instead of the article. Worth its own type:
+ * these products fingerprint the TLS handshake, so no retry and no amount of
+ * header tuning gets through — only the user's own browser will, which is what
+ * the paste fallback is for. Saying so beats a bare "HTTP 403", which reads
+ * like a broken link and invites pointless retries.
+ */
+export class BlockedError extends FetchError {
+  constructor(message: string) {
+    super(message, true);
+  }
+}
+
+// Substrings that identify a bot wall, mapped to the name worth reporting.
+const BLOCK_VENDORS: [string, string][] = [
+  ["captcha-delivery.com", "DataDome"],
+  ["datadome", "DataDome"],
+  ["cdn-cgi/challenge-platform", "Cloudflare"],
+  ["cf-browser-verification", "Cloudflare"],
+  ["just a moment...", "Cloudflare"],
+  ["_incapsula_resource", "Imperva"],
+  ["px-captcha", "PerimeterX"],
+  ["perimeterx", "PerimeterX"],
+  ["please enable js", "a JavaScript bot wall"],
+  ["enable javascript and cookies", "a JavaScript bot wall"],
+  ["verifying you are human", "a JavaScript bot wall"],
+];
+
+/**
+ * Name the bot wall behind a response, or null if it looks like an ordinary
+ * error. Vendor markers are checked at any status because some walls answer
+ * 200 with a challenge page; the status codes stand in as evidence only when
+ * no marker is recognisable.
+ */
+// Statuses where a challenge page is plausible. A 404 or 500 is the origin's
+// own error even when Cloudflare has injected its challenge script into the
+// response, so matching markers there would report a dead link as a bot wall.
+const WALL_STATUSES = new Set([200, 401, 403, 503]);
+
+function detectBotWall(status: number, body: string): string | null {
+  if (!WALL_STATUSES.has(status)) return null;
+  const hay = body.slice(0, 20_000).toLowerCase();
+  for (const [marker, vendor] of BLOCK_VENDORS) {
+    if (hay.includes(marker)) return `blocks automated fetching (${vendor})`;
+  }
+  if (status === 401 || status === 403) {
+    return `blocks automated fetching (HTTP ${status})`;
+  }
+  return null;
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+const PASTE_HINT = 'open it in your browser, then use "Paste article"';
 
 export interface Article {
   url: string;
@@ -143,6 +215,38 @@ export function cleanArticleHtml(html: string, baseUrl: string): string {
   return doc.body?.innerHTML ?? html;
 }
 
+/**
+ * Follow redirects and report where a URL actually lands, ignoring the status —
+ * a bot wall still names the destination it refused to serve. Opaque shortcodes
+ * (links.tldrnewsletter.com/uegIWW) carry no destination for unwrapTracking to
+ * read, so only a request reveals it. Falls back to the input, because a slow
+ * resolver must never cost the user a paste.
+ */
+export async function resolveFinalUrl(url: string): Promise<string> {
+  // HEAD first: the redirect chain is all we want and there is no body to
+  // download. But a redirector that rejects the method outright never
+  // redirects at all, so fall back to GET when HEAD is refused — silently
+  // keeping the shortcode is the failure this function exists to prevent.
+  for (const method of ["HEAD", "GET"] as const) {
+    let resp: Response;
+    try {
+      resp = await fetch(url, {
+        method,
+        headers: FETCH_HEADERS,
+        redirect: "follow",
+        signal: AbortSignal.timeout(8_000),
+      });
+    } catch {
+      return url; // unreachable or timed out; the caller's URL is all we have
+    }
+    // Nothing here reads the body; drop it so the socket returns to the pool.
+    await resp.body?.cancel().catch(() => {});
+    if (resp.url && resp.url !== url) return resp.url;
+    if (resp.status !== 405 && resp.status !== 501) return url; // HEAD honoured
+  }
+  return url;
+}
+
 export async function fetchArticle(url: string): Promise<Article> {
   let protocol: string;
   try {
@@ -163,9 +267,19 @@ export async function fetchArticle(url: string): Promise<Article> {
   } catch (e) {
     throw new FetchError(`fetch failed: ${e}`);
   }
-  if (!resp.ok) throw new FetchError(`fetch failed: HTTP ${resp.status}`);
   const ctype = resp.headers.get("content-type") ?? "";
-  const body = await resp.text();
+  const body = await resp.text().catch(() => "");
+  const host = hostOf(resp.url);
+  if (!resp.ok) {
+    // Rate limiting is the one refusal that time alone fixes; calling it a
+    // block would send the user off to paste a page a retry would have got.
+    if (resp.status === 429) {
+      throw new FetchError(`${host} is rate-limiting us (HTTP 429) — wait a few minutes and retry`);
+    }
+    const wall = detectBotWall(resp.status, body);
+    if (wall) throw new BlockedError(`${host} ${wall} — ${PASTE_HINT}`);
+    throw new FetchError(`fetch failed: HTTP ${resp.status}`);
+  }
   if (!ctype.includes("html") && !/^\s*<(!doctype|html)/i.test(body)) {
     throw new FetchError(`not an HTML page (content-type: ${ctype || "unknown"})`);
   }
@@ -180,7 +294,12 @@ export async function fetchArticle(url: string): Promise<Article> {
   } else {
     const article = new Readability(doc).parse();
     if (!article?.content) {
-      throw new FetchError("couldn't extract readable content from this page");
+      // A wall that answers 200 with a challenge page lands here, not above.
+      const wall = detectBotWall(resp.status, body);
+      if (wall) throw new BlockedError(`${host} ${wall} — ${PASTE_HINT}`);
+      throw new FetchError(
+        `couldn't extract readable content from this page — ${PASTE_HINT}`, true,
+      );
     }
     rawHtml = article.content;
     title = (article.title ?? "").trim();
@@ -189,7 +308,11 @@ export async function fetchArticle(url: string): Promise<Article> {
   const html = cleanArticleHtml(rawHtml, resp.url);
   const textLength = textOf(html).trim().length;
   if (textLength < 200) {
-    throw new FetchError("extraction produced almost no text (paywall or JS-only page?)");
+    const wall = detectBotWall(resp.status, body);
+    if (wall) throw new BlockedError(`${host} ${wall} — ${PASTE_HINT}`);
+    throw new FetchError(
+      `extraction produced almost no text (paywall or JS-only page?) — ${PASTE_HINT}`, true,
+    );
   }
   // A scraped <h1> can span nested elements (banners, badges), yielding a
   // multi-line textContent; collapse it so titles are always one line.

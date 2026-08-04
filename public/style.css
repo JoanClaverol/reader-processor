@@ -253,7 +253,11 @@ body.resizing .col { transition: none; }
 #preview-status {
   position: absolute; inset: 0; z-index: 1; pointer-events: none;
   display: flex; align-items: center; justify-content: center; gap: .6rem;
+  flex-wrap: wrap; padding: 0 1.5rem;
 }
+/* The overlay ignores clicks so the preview stays selectable; an action button
+   in it has to opt back in. */
+#preview-status button { pointer-events: auto; }
 .spinner {
   width: 15px; height: 15px; flex: 0 0 auto;
   border: 2px solid var(--accent-soft); border-top-color: var(--accent-bright);
@@ -306,3 +310,24 @@ dialog td { padding: .4rem .5rem; border-bottom: 1px solid var(--border); vertic
 dialog td small { color: var(--text-3); }
 dialog #modal-close { margin-top: .9rem; align-self: flex-start; }
 .ok { color: var(--ok); } .fail { color: var(--fail); }
+
+/* ---------- paste-article dialog ---------- */
+.paste-hint { margin: 0 0 .7rem; font-size: .82rem; color: var(--text-3); }
+.paste-hint a { color: var(--accent-bright); }
+#paste-title {
+  width: 100%; margin-bottom: .6rem; padding: .45rem .6rem;
+  border: 1px solid var(--border-strong); border-radius: var(--r-sm);
+  background: var(--bg-2); color: var(--text-1); font: inherit; font-size: .86rem;
+}
+#paste-body {
+  min-height: 11rem; max-height: 34vh; overflow-y: auto; padding: .6rem .7rem;
+  border: 1px solid var(--border-strong); border-radius: var(--r-sm);
+  background: var(--bg-2); font-size: .84rem; line-height: 1.5;
+}
+#paste-body:focus, #paste-title:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+#paste-body img { max-width: 100%; height: auto; }
+.paste-actions {
+  display: flex; align-items: center; justify-content: flex-end;
+  gap: .7rem; margin-top: .8rem;
+}
+#paste-error { font-size: .8rem; margin-right: auto; }
