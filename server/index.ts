@@ -173,6 +173,14 @@ app.post("/api/article/paste", async (req, res) => {
   res.json({ title, url: finalUrl });
 });
 
+/** `warning: true` marks bookkeeping that failed after a successful send. */
+interface SendResult {
+  title: string;
+  ok: boolean;
+  detail: string;
+  warning?: boolean;
+}
+
 interface SendItem {
   kind: "body" | "link";
   msg_id: string;
@@ -184,7 +192,7 @@ app.post("/api/send", async (req, res) => {
   const bundle: boolean = !!req.body?.bundle && items.length > 1;
   const config = loadConfig();
   const g = gmail.gmailClient();
-  const results = [];
+  const results: SendResult[] = [];
   const touched = new Set<string>();
 
   // Resolve every item to a section (title + faithful html + source).
@@ -253,9 +261,28 @@ app.post("/api/send", async (req, res) => {
     }
   }
 
+  // Everything above has already been emailed and recorded as 'sent'. A Gmail
+  // hiccup here used to escape the handler, so Express answered with an HTML
+  // 500, the dashboard failed to parse it and reported every delivered book as
+  // a failure. Labelling is bookkeeping: report it, never let it rewrite the
+  // outcome. Per-message try/catch so one bad id can't skip the rest.
   if (touched.size > 0) {
-    const labelId = await gmail.ensureLabel(g, config.sentLabel);
-    for (const msgId of touched) await gmail.addLabel(g, msgId, labelId);
+    const warn = (detail: string) =>
+      results.push({ title: `"${config.sentLabel}" label`, ok: false, warning: true, detail });
+    try {
+      const labelId = await gmail.ensureLabel(g, config.sentLabel);
+      const failed = (
+        await Promise.all(
+          [...touched].map((msgId) =>
+            gmail.addLabel(g, msgId, labelId).then(() => null, () => msgId)),
+        )
+      ).filter((id): id is string => id !== null);
+      if (failed.length > 0) {
+        warn(`couldn't label ${failed.length} of ${touched.size} message(s) — everything above was still sent`);
+      }
+    } catch (e) {
+      warn(`${String((e as Error).message ?? e)} — everything above was still sent`);
+    }
   }
   res.json({ results });
 });

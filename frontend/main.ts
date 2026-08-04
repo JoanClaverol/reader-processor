@@ -8,7 +8,9 @@ interface Newsletter {
   id: string; sender_display: string; subject: string; date_iso: string;
   body_sent: boolean; minutes: number | null; links: Link[];
 }
-interface SendResult { title: string; ok: boolean; detail: string }
+// `warning` marks bookkeeping that failed after the book was already sent
+// (e.g. the Gmail label) — it must never be counted as a failed delivery.
+interface SendResult { title: string; ok: boolean; detail: string; warning?: boolean }
 
 type SelItem = { kind: "body" | "link"; msg_id: string; url?: string; title: string };
 
@@ -569,8 +571,9 @@ async function sendItems(items: SelItem[]): Promise<void> {
 }
 
 function showSendToast(results: SendResult[]): void {
-  const fails = results.filter((r) => !r.ok);
-  const okCount = results.length - fails.length;
+  const fails = results.filter((r) => !r.ok && !r.warning);
+  const warnings = results.filter((r) => r.warning);
+  const okCount = results.filter((r) => r.ok).length;
   const allOk = fails.length === 0;
   const toast = document.createElement("div");
   toast.className = "toast";
@@ -580,6 +583,7 @@ function showSendToast(results: SendResult[]): void {
         ? `${okCount} item${okCount === 1 ? "" : "s"} sent to Kindle`
         : `${okCount} sent · ${fails.length} failed`}</span></div>
     ${allOk ? "" : `<ul class="toast-fails">${fails.map((f) => `<li>${escapeHtml(f.title)}</li>`).join("")}</ul>`}
+    ${warnings.map((w) => `<div class="toast-warn">⚠️ ${escapeHtml(w.detail)}</div>`).join("")}
     <div class="toast-actions"><button class="ghost toast-details">Details</button></div>`;
   let dismissed = false;
   const dismiss = (): void => {
@@ -600,9 +604,12 @@ sendThisBtn.addEventListener("click", () => {
 });
 
 function showResults(results: SendResult[]): void {
-  const rows = results.map((r) => `
-    <tr><td class="${r.ok ? "ok" : "fail"}">${r.ok ? "✓" : "✗"}</td>
-    <td>${escapeHtml(r.title)}${r.ok ? "" : `<br><small>${escapeHtml(r.detail)}</small>`}</td></tr>`);
+  const rows = results.map((r) => {
+    const [cls, glyph] = r.warning ? ["warn", "⚠️"] : r.ok ? ["ok", "✓"] : ["fail", "✗"];
+    return `
+    <tr><td class="${cls}">${glyph}</td>
+    <td>${escapeHtml(r.title)}${r.ok ? "" : `<br><small>${escapeHtml(r.detail)}</small>`}</td></tr>`;
+  });
   modalContent.innerHTML = `<h3>Send results</h3><table>${rows.join("")}</table>`;
   closeGuard = null; // this content replaced whatever the guard was protecting
   modal.showModal();

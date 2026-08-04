@@ -18,6 +18,7 @@
   --ok-soft: #4ade801f;
   --fail: #f87171;
   --fail-soft: #f871711f;
+  --warn: #fbbf24;
   --r-sm: 6px; --r-md: 10px; --r-lg: 14px;
   --shadow-1: 0 1px 2px #00000040, 0 2px 8px #00000030;
   --shadow-2: 0 4px 16px #00000055, 0 12px 40px #00000040;
@@ -44,6 +45,7 @@
     --ok-soft: #16a34a18;
     --fail: #dc2626;
     --fail-soft: #dc262614;
+    --warn: #b45309;
     --shadow-1: 0 1px 2px #00000014, 0 2px 8px #0000000d;
     --shadow-2: 0 4px 16px #0000001c, 0 12px 40px #00000014;
   }
@@ -309,7 +311,10 @@ dialog table { border-collapse: collapse; width: 100%; font-size: .86rem; }
 dialog td { padding: .4rem .5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
 dialog td small { color: var(--text-3); }
 dialog #modal-close { margin-top: .9rem; align-self: flex-start; }
-.ok { color: var(--ok); } .fail { color: var(--fail); }
+.ok { color: var(--ok); } .fail { color: var(--fail); } .warn { color: var(--warn); }
+/* Bookkeeping that failed after the book was already sent — not a delivery
+   failure, so it reads as an aside rather than another red line. */
+.toast-warn { margin-top: .4rem; font-size: .8rem; color: var(--warn); }
 
 /* ---------- paste-article dialog ---------- */
 .paste-hint { margin: 0 0 .7rem; font-size: .82rem; color: var(--text-3); }

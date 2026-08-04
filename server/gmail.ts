@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { existsSync, readFileSync } from "fs";
 import path from "path";
 import { google } from "googleapis";
@@ -104,8 +105,24 @@ function encodeSubject(subject: string): string {
 }
 
 function epubFilename(title: string): string {
-  // Trim again after slicing: an 80-char cut can land just past a space.
-  return (title.replace(/[^\w\s.-]/g, "").trim().slice(0, 80).trim() || "article") + ".epub";
+  // Decompose first so accents become ASCII letters plus combining marks, and
+  // drop the marks: "¿Cómo estás?" keeps its words as "Como estas" instead of
+  // being gutted to "Cmo ests". Stays pure ASCII, so the filename needs no
+  // RFC 2231 encoding in the MIME headers below — Amazon is unforgiving there.
+  const ascii = title
+    .normalize("NFKD").replace(/\p{M}/gu, "")
+    // Trim again after slicing: an 80-char cut can land just past a space.
+    .replace(/[^\w\s.-]/g, "").trim().slice(0, 80).trim();
+  if (ascii) return ascii + ".epub";
+  // Scripts that don't reduce to ASCII at all (Japanese, Cyrillic, Greek) used
+  // to collapse to a single shared "article.epub". Bounce notices are matched
+  // to sends by filename, so identical names made checkBounces flip the wrong
+  // row — marking a delivered article as bounced and leaving the real failure
+  // showing as sent. Derive the suffix from the title so distinct articles get
+  // distinct names, while a resend of the same title keeps the one filename
+  // rowsToFlip already expects.
+  const digest = createHash("sha1").update(title).digest("hex").slice(0, 8);
+  return `article-${digest}.epub`;
 }
 
 /** Sends the book and returns the attachment filename it went out under. */
