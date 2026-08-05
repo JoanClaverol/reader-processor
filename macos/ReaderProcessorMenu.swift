@@ -17,7 +17,27 @@ let nodeCandidates = [
     "/usr/bin/node",
 ]
 
+/// PATH for children, derived from the same list so there's one place to edit.
+let childPath = (nodeCandidates.map { ($0 as NSString).deletingLastPathComponent } + ["/bin"])
+    .joined(separator: ":")
+
 final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    /// One lifecycle, one variable: a port can't exist without a process, and
+    /// "starting" can't disagree with whether something is running.
+    private enum State {
+        case stopped
+        case starting(Process)
+        case running(Process, Int)
+
+        var process: Process? {
+            switch self {
+            case .stopped: return nil
+            case .starting(let p): return p
+            case .running(let p, _): return p
+            }
+        }
+    }
+
     private var statusItem: NSStatusItem!
     private let statusLine = NSMenuItem(title: "Server: stopped", action: nil, keyEquivalent: "")
     private let stopItem = NSMenuItem(
@@ -25,10 +45,10 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let authItem = NSMenuItem(
         title: "Re-authenticate Gmail…", action: #selector(reauthenticate), keyEquivalent: "")
 
-    private var server: Process?
-    private var port: Int?
-    private var starting = false
-    private var authenticating = false
+    private var state: State = .stopped { didSet { refreshMenu() } }
+    private var serverPipe: Pipe?
+    private var serverLog = ""  // kept so a failed start can explain itself
+    private var authProcess: Process?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -66,7 +86,13 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Children outlive us otherwise: they'd be reparented to launchd and
+        // keep holding the port and the SQLite file.
         killServer()
+        if let auth = authProcess, auth.isRunning {
+            auth.terminate()
+            authProcess = nil
+        }
     }
 
     // MARK: - Menu state
@@ -76,33 +102,34 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func refreshMenu() {
-        let running = server?.isRunning == true
-        if starting {
-            statusLine.title = "Server: starting…"
-        } else if running, let port {
-            statusLine.title = "Server: running :\(port)"
-        } else {
-            statusLine.title = "Server: stopped"
+        switch state {
+        case .stopped: statusLine.title = "Server: stopped"
+        case .starting: statusLine.title = "Server: starting…"
+        case .running(_, let port): statusLine.title = "Server: running :\(port)"
         }
-        stopItem.isEnabled = running
-        authItem.title = authenticating ? "Authenticating in browser…" : "Re-authenticate Gmail…"
-        authItem.isEnabled = !authenticating
+        stopItem.isEnabled = state.process != nil
+
+        // The OAuth flow blocks on a human who may never come back, so the
+        // item stays live as a cancel rather than latching disabled forever.
+        let authing = authProcess?.isRunning == true
+        authItem.title = authing ? "Cancel authentication" : "Re-authenticate Gmail…"
     }
 
     // MARK: - Actions
 
     @objc private func openDashboard() {
-        if let port, server?.isRunning == true {
+        switch state {
+        case .running(_, let port):
             openWindow(port: port)
-            return
+        case .starting:
+            break  // a window is already queued behind the readiness poll
+        case .stopped:
+            startServer()
         }
-        guard !starting else { return }
-        startServer()
     }
 
     @objc private func stopServer() {
         killServer()
-        refreshMenu()
     }
 
     @objc private func quit() {
@@ -137,7 +164,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         process.currentDirectoryURL = URL(fileURLWithPath: repoPath)
 
         var env = ProcessInfo.processInfo.environment
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        env["PATH"] = childPath
         process.environment = env
         return process
     }
@@ -149,55 +176,78 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // We open the window ourselves in app mode, so stop the CLI racing us.
         process.environment?["NO_OPEN"] = "1"
 
-        // The CLI announces its port on stdout; that's how we learn which one
-        // it settled on after probing upward from 8377.
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
+        serverLog = ""
+
+        // stdout and stderr share this pipe and node writes to it for as long
+        // as it lives, so it has to keep being drained: a full pipe buffer
+        // would block the server mid-request.
+        var buffer = Data()
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
-            guard !chunk.isEmpty, let text = String(data: chunk, encoding: .utf8) else { return }
-            guard let found = Self.parsePort(text) else { return }
-            DispatchQueue.main.async { self?.serverAnnounced(port: found) }
+            guard !chunk.isEmpty else {
+                // EOF. The handler would otherwise re-fire forever on a
+                // readable-at-EOF descriptor — measured at ~1M spins/second.
+                handle.readabilityHandler = nil
+                return
+            }
+            // Match on accumulated text, not the raw chunk: a read boundary
+            // inside "8377" would otherwise latch a truncated port.
+            buffer.append(chunk)
+            guard let text = String(data: buffer, encoding: .utf8) else { return }
+            DispatchQueue.main.async { self?.serverLogged(text) }
         }
 
-        process.terminationHandler = { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.server = nil
-                self?.port = nil
-                self?.starting = false
-                self?.refreshMenu()
-            }
+        process.terminationHandler = { [weak self] proc in
+            DispatchQueue.main.async { self?.serverExited(proc) }
         }
 
         do {
             try process.run()
         } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
             alert("Couldn't start the server", error.localizedDescription)
             return
         }
 
-        server = process
-        starting = true
-        refreshMenu()
+        serverPipe = pipe
+        state = .starting(process)
     }
 
-    private func serverAnnounced(port: Int) {
-        guard self.port == nil else { return }  // only act on the first announcement
-        self.port = port
+    /// Called with everything the server has printed so far.
+    private func serverLogged(_ text: String) {
+        serverLog = text
+        guard case .starting(let process) = state, let port = Self.parsePort(text) else { return }
+        state = .running(process, port)
         pollUntilReady(port: port, attempts: 40)
+    }
+
+    private func serverExited(_ proc: Process) {
+        // A late-dying predecessor must not clear the state of its successor.
+        guard proc === state.process else { return }
+        let log = serverLog
+        let status = proc.terminationStatus
+        teardownServerPipe()
+        state = .stopped
+        // Without this, a startup failure — "Build output missing", a bad
+        // token, a crash in dist-server — is a menu that blinks and does nothing.
+        if status != 0 {
+            alert(
+                "Server stopped unexpectedly",
+                log.isEmpty ? "Exit code \(status)." : log.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
     }
 
     /// The port is printed before the socket is actually listening, so knock
     /// until it answers rather than opening a window onto a connection error.
     private func pollUntilReady(port: Int, attempts: Int) {
         guard attempts > 0 else {
-            starting = false
-            refreshMenu()
             alert("Server didn't come up", "Nothing answered on port \(port).")
             return
         }
-        guard let url = URL(string: "http://127.0.0.1:\(port)/") else { return }
+        guard case .running = state, let url = URL(string: "http://127.0.0.1:\(port)/") else { return }
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 2
@@ -205,9 +255,8 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard case .running = self.state else { return }  // stopped while polling
                 if response != nil {
-                    self.starting = false
-                    self.refreshMenu()
                     self.openWindow(port: port)
                 } else {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -218,12 +267,19 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }.resume()
     }
 
+    private func teardownServerPipe() {
+        serverPipe?.fileHandleForReading.readabilityHandler = nil
+        serverPipe = nil
+    }
+
     private func killServer() {
-        guard let server, server.isRunning else { return }
-        server.terminate()
-        self.server = nil
-        self.port = nil
-        self.starting = false
+        guard let process = state.process, process.isRunning else {
+            state = .stopped
+            return
+        }
+        state = .stopped  // ignore this process's termination callback from here on
+        teardownServerPipe()
+        process.terminate()
     }
 
     // MARK: - Gmail re-authentication
@@ -232,40 +288,55 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Google expires refresh tokens weekly while the OAuth consent screen is in
     /// Testing mode, so this is a routine chore rather than a one-time setup step.
     @objc private func reauthenticate() {
-        guard !authenticating, let tooling = resolveTooling() else { return }
+        // Second click cancels: auth.ts waits on a browser redirect with no
+        // timeout, so an abandoned flow would otherwise hang around forever.
+        if let running = authProcess, running.isRunning {
+            running.terminate()
+            authProcess = nil
+            refreshMenu()
+            return
+        }
+        guard let tooling = resolveTooling() else { return }
 
         let process = childProcess(tooling, ["auth"])
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
 
-        // Read to EOF on a background queue; the flow blocks on a human in a browser.
-        var output = Data()
-        let collected = DispatchGroup()
-        collected.enter()
-        DispatchQueue.global(qos: .utility).async {
-            output = pipe.fileHandleForReading.readDataToEndOfFile()
-            collected.leave()
+        // Drain incrementally rather than blocking a thread on
+        // readDataToEndOfFile, which never returns if run() throws.
+        let collected = Collector()
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
+            collected.append(chunk)
         }
 
-        process.terminationHandler = { proc in
-            collected.wait()
-            let text = String(data: output, encoding: .utf8) ?? ""
-            DispatchQueue.main.async { [weak self] in
-                self?.authenticating = false
-                self?.refreshMenu()
-                self?.authFinished(status: proc.terminationStatus, output: text)
+        process.terminationHandler = { [weak self] proc in
+            let status = proc.terminationStatus
+            let text = collected.text()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                pipe.fileHandleForReading.readabilityHandler = nil
+                let cancelled = self.authProcess !== proc
+                self.authProcess = nil
+                self.refreshMenu()
+                if !cancelled { self.authFinished(status: status, output: text) }
             }
         }
 
         do {
             try process.run()
         } catch {
+            pipe.fileHandleForReading.readabilityHandler = nil
             alert("Couldn't start authentication", error.localizedDescription)
             return
         }
 
-        authenticating = true
+        authProcess = process
         refreshMenu()
     }
 
@@ -289,31 +360,48 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert("Gmail re-authenticated", "Reload the dashboard to pick it up.\(note)")
     }
 
-    private static func parseTokenPath(_ text: String) -> String? {
-        guard let range = text.range(of: "Token saved to ") else { return nil }
-        let rest = text[range.upperBound...]
-        let path = rest.prefix(while: { !$0.isNewline }).trimmingCharacters(in: .whitespaces)
-        return path.isEmpty ? nil : path
-    }
-
     // MARK: - Window
 
     private func openWindow(port: Int) {
-        let url = "http://localhost:\(port)/"
-        let chrome = "/Applications/Google Chrome.app"
+        let url = URL(string: "http://localhost:\(port)/")!
 
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        if FileManager.default.fileExists(atPath: chrome) {
-            // --app gives a window with no tab strip or address bar.
-            task.arguments = ["-na", "Google Chrome", "--args", "--app=\(url)"]
-        } else {
-            task.arguments = [url]
+        // --app gives a window with no tab strip or address bar. Ask the
+        // workspace where Chrome is rather than assuming /Applications: a
+        // per-user install lives under ~/Applications.
+        let chrome = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.google.Chrome")
+        guard let chrome else {
+            NSWorkspace.shared.open(url)
+            return
         }
-        try? task.run()
+        let config = NSWorkspace.OpenConfiguration()
+        config.arguments = ["--app=\(url.absoluteString)"]
+        config.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: chrome, configuration: config) { _, error in
+            if error != nil { DispatchQueue.main.async { NSWorkspace.shared.open(url) } }
+        }
     }
 
     // MARK: - Helpers
+
+    /// Accumulates child output across reads; the handler fires on a dispatch
+    /// queue, so the buffer needs its own lock.
+    private final class Collector {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func append(_ chunk: Data) {
+            lock.lock()
+            data.append(chunk)
+            lock.unlock()
+        }
+
+        func text() -> String {
+            lock.lock()
+            defer { lock.unlock() }
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+    }
 
     private static func parsePort(_ text: String) -> Int? {
         let pattern = "localhost:([0-9]+)"
@@ -323,6 +411,13 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let range = Range(match.range(at: 1), in: text)
         else { return nil }
         return Int(text[range])
+    }
+
+    private static func parseTokenPath(_ text: String) -> String? {
+        guard let range = text.range(of: "Token saved to ") else { return nil }
+        let rest = text[range.upperBound...]
+        let path = rest.prefix(while: { !$0.isNewline }).trimmingCharacters(in: .whitespaces)
+        return path.isEmpty ? nil : path
     }
 
     private func alert(_ title: String, _ detail: String) {

@@ -26,7 +26,11 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-swiftc -O -o "$APP/Contents/MacOS/ReaderProcessor" "$HERE/ReaderProcessorMenu.swift"
+# Without an explicit -target, swiftc stamps the build host's macOS as the
+# minimum, so the LSMinimumSystemVersion above would be a decorative claim the
+# binary contradicts.
+swiftc -O -target "$(uname -m)-apple-macos13.0" \
+  -o "$APP/Contents/MacOS/ReaderProcessor" "$HERE/ReaderProcessorMenu.swift"
 
 # Ad-hoc sign so Gatekeeper doesn't nag about a locally built bundle.
 codesign --force --sign - "$APP"
