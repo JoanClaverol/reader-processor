@@ -85,6 +85,14 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshMenu()
     }
 
+    /// The app launches at login and never quits, so picking it in Spotlight is
+    /// a reopen of the running instance rather than a launch. Without this the
+    /// keystroke lands on a process that has nothing to show and does nothing.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        openDashboard()
+        return true
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         // Children outlive us otherwise: they'd be reparented to launchd and
         // keep holding the port and the SQLite file.
