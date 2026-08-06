@@ -1,13 +1,12 @@
-// Reader Processor macOS app.
+// Reader Processor macOS launcher.
 //
-// Owns a native WebKit window and spawns the Node server on demand. Quitting
-// stops the server.
+// Owns the local Node server and a dedicated Chrome app-mode process. Quitting
+// either app stops the other, so no server is left holding the port or SQLite.
 
 import AppKit
-import WebKit
 
-// Where the checkout lives. Change if you move the repo.
-let repoPath = "\(NSHomeDirectory())/Developer/reader-processor"
+let repoPath = Bundle.main.object(forInfoDictionaryKey: "ReaderProcessorRepoRoot") as? String
+    ?? "\(NSHomeDirectory())/Developer/reader-processor"
 
 // GUI apps don't inherit your shell PATH, so node has to be found by hand.
 let nodeCandidates = [
@@ -16,13 +15,10 @@ let nodeCandidates = [
     "/usr/bin/node",
 ]
 
-/// PATH for children, derived from the same list so there's one place to edit.
 let childPath = (nodeCandidates.map { ($0 as NSString).deletingLastPathComponent } + ["/bin"])
     .joined(separator: ":")
 
-final class MenuApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
-    /// One lifecycle, one variable: a port can't exist without a process, and
-    /// "starting" can't disagree with whether something is running.
+final class LauncherApp: NSObject, NSApplicationDelegate {
     private enum State {
         case stopped
         case starting(Process)
@@ -31,168 +27,115 @@ final class MenuApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
         var process: Process? {
             switch self {
             case .stopped: return nil
-            case .starting(let p): return p
-            case .running(let p, _): return p
+            case .starting(let process): return process
+            case .running(let process, _): return process
             }
         }
     }
 
-    private var window: NSWindow!
-    private var webView: WKWebView!
-    private var loadingView: NSView!
-    private var loadingLabel: NSTextField!
-    private let statusLine = NSMenuItem(title: "Server: stopped", action: nil, keyEquivalent: "")
-    private let stopItem = NSMenuItem(
-        title: "Stop server", action: #selector(stopServer), keyEquivalent: "")
-    private let authItem = NSMenuItem(
-        title: "Re-authenticate Gmail…", action: #selector(reauthenticate), keyEquivalent: "")
-
     private var state: State = .stopped { didSet { refreshMenu() } }
     private var serverPipe: Pipe?
-    private var serverLog = ""  // kept so a failed start can explain itself
+    private var serverLog = ""
     private var authProcess: Process?
+    private var chromeProcess: Process?
+    private var isTerminating = false
+
+    private var loadingWindow: NSWindow!
+    private var loadingLabel: NSTextField!
+    private let statusLine = NSMenuItem(title: "Server: stopped", action: nil, keyEquivalent: "")
+    private let authItem = NSMenuItem(
+        title: "Re-authenticate Gmail...", action: #selector(reauthenticate), keyEquivalent: "")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
-        buildWindow()
+        buildLoadingWindow()
         refreshMenu()
-        openDashboard()
+        showLoadingWindow()
+        startServer()
     }
 
-    /// The app launches at login and never quits, so picking it in Spotlight is
-    /// a reopen of the running instance rather than a launch. Without this the
-    /// keystroke lands on a process that has nothing to show and does nothing.
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        openDashboard()
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication, hasVisibleWindows: Bool
+    ) -> Bool {
+        if let chromeProcess, chromeProcess.isRunning {
+            chromeApplication()?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        } else if state.process == nil {
+            showLoadingWindow()
+            startServer()
+        } else {
+            showLoadingWindow()
+        }
         return true
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+        chromeProcess == nil
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Children outlive us otherwise: they'd be reparented to launchd and
-        // keep holding the port and the SQLite file.
+        isTerminating = true
+        if let chromeProcess, chromeProcess.isRunning { chromeProcess.terminate() }
         killServer()
-        if let auth = authProcess, auth.isRunning {
-            auth.terminate()
-            authProcess = nil
-        }
+        if let authProcess, authProcess.isRunning { authProcess.terminate() }
     }
 
-    // MARK: - Menu state
-
-    private func refreshMenu() {
-        switch state {
-        case .stopped:
-            statusLine.title = "Server: stopped"
-            loadingLabel?.stringValue = "Starting Reader Processor…"
-        case .starting:
-            statusLine.title = "Server: starting…"
-            loadingLabel?.stringValue = "Starting Reader Processor…"
-        case .running(_, let port): statusLine.title = "Server: running :\(port)"
-        }
-        stopItem.isEnabled = state.process != nil
-
-        // The OAuth flow blocks on a human who may never come back, so the
-        // item stays live as a cancel rather than latching disabled forever.
-        let authing = authProcess?.isRunning == true
-        authItem.title = authing ? "Cancel authentication" : "Re-authenticate Gmail…"
-    }
-
-    // MARK: - Actions
-
-    @objc private func openDashboard() {
-        showWindow()
-        switch state {
-        case .running(_, let port):
-            openWindow(port: port)
-        case .starting:
-            break  // a window is already queued behind the readiness poll
-        case .stopped:
-            startServer()
-        }
-    }
-
-    @objc private func stopServer() {
-        killServer()
-    }
-
-    @objc private func quit() {
-        NSApp.terminate(nil)
-    }
-
-    @objc private func reloadDashboard() {
-        webView.reload()
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard urls.contains(where: {
+            $0.scheme == "reader-processor" && $0.host == "authenticate"
+        }) else { return }
+        if authProcess?.isRunning != true { reauthenticate() }
     }
 
     // MARK: - Server lifecycle
 
-    /// node and the CLI entry point, or nil (having explained why) if either is missing.
     private func resolveTooling() -> (node: String, script: String)? {
         let script = "\(repoPath)/bin/reader-process.js"
         guard FileManager.default.isReadableFile(atPath: script) else {
             alert("Can't find the app", "Expected the checkout at \(repoPath).")
             return nil
         }
-        guard
-            let node = nodeCandidates.first(where: {
-                FileManager.default.isExecutableFile(atPath: $0)
-            })
-        else {
+        guard let node = nodeCandidates.first(where: {
+            FileManager.default.isExecutableFile(atPath: $0)
+        }) else {
             alert("Can't find node", "Looked in:\n" + nodeCandidates.joined(separator: "\n"))
             return nil
         }
         return (node, script)
     }
 
-    /// GUI apps get a bare environment, so node and its PATH are spelled out.
     private func childProcess(_ tooling: (node: String, script: String), _ args: [String]) -> Process {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tooling.node)
         process.arguments = [tooling.script] + args
         process.currentDirectoryURL = URL(fileURLWithPath: repoPath)
-
-        var env = ProcessInfo.processInfo.environment
-        env["PATH"] = childPath
-        process.environment = env
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = childPath
+        process.environment = environment
         return process
     }
 
     private func startServer() {
-        guard let tooling = resolveTooling() else { return }
-
+        guard state.process == nil, let tooling = resolveTooling() else { return }
         let process = childProcess(tooling, [])
-        // We open the window ourselves in app mode, so stop the CLI racing us.
         process.environment?["NO_OPEN"] = "1"
 
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
         serverLog = ""
-
-        // stdout and stderr share this pipe and node writes to it for as long
-        // as it lives, so it has to keep being drained: a full pipe buffer
-        // would block the server mid-request.
         var buffer = Data()
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else {
-                // EOF. The handler would otherwise re-fire forever on a
-                // readable-at-EOF descriptor — measured at ~1M spins/second.
                 handle.readabilityHandler = nil
                 return
             }
-            // Match on accumulated text, not the raw chunk: a read boundary
-            // inside "8377" would otherwise latch a truncated port.
             buffer.append(chunk)
             guard let text = String(data: buffer, encoding: .utf8) else { return }
             DispatchQueue.main.async { self?.serverLogged(text) }
         }
-
-        process.terminationHandler = { [weak self] proc in
-            DispatchQueue.main.async { self?.serverExited(proc) }
+        process.terminationHandler = { [weak self] process in
+            DispatchQueue.main.async { self?.serverExited(process) }
         }
 
         do {
@@ -202,12 +145,10 @@ final class MenuApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
             alert("Couldn't start the server", error.localizedDescription)
             return
         }
-
         serverPipe = pipe
         state = .starting(process)
     }
 
-    /// Called with everything the server has printed so far.
     private func serverLogged(_ text: String) {
         serverLog = text
         guard case .starting(let process) = state, let port = Self.parsePort(text) else { return }
@@ -215,40 +156,40 @@ final class MenuApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
         pollUntilReady(port: port, attempts: 40)
     }
 
-    private func serverExited(_ proc: Process) {
-        // A late-dying predecessor must not clear the state of its successor.
-        guard proc === state.process else { return }
+    private func serverExited(_ process: Process) {
+        guard process === state.process else { return }
         let log = serverLog
-        let status = proc.terminationStatus
+        let status = process.terminationStatus
         teardownServerPipe()
         state = .stopped
-        // Without this, a startup failure — "Build output missing", a bad
-        // token, a crash in dist-server — is a menu that blinks and does nothing.
+        guard !isTerminating else { return }
+        chromeProcess?.terminate()
+        chromeProcess = nil
         if status != 0 {
             alert(
                 "Server stopped unexpectedly",
                 log.isEmpty ? "Exit code \(status)." : log.trimmingCharacters(in: .whitespacesAndNewlines))
         }
+        NSApp.terminate(nil)
     }
 
-    /// The port is printed before the socket is actually listening, so knock
-    /// until it answers rather than opening a window onto a connection error.
     private func pollUntilReady(port: Int, attempts: Int) {
         guard attempts > 0 else {
             alert("Server didn't come up", "Nothing answered on port \(port).")
+            NSApp.terminate(nil)
             return
         }
-        guard case .running = state, let url = URL(string: "http://127.0.0.1:\(port)/") else { return }
+        guard case .running = state,
+            let url = URL(string: "http://127.0.0.1:\(port)/")
+        else { return }
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 2
-
         URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
             DispatchQueue.main.async {
-                guard let self else { return }
-                guard case .running = self.state else { return }  // stopped while polling
+                guard let self, case .running = self.state else { return }
                 if response != nil {
-                    self.openWindow(port: port)
+                    self.openChrome(port: port)
                 } else {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         self.pollUntilReady(port: port, attempts: attempts - 1)
@@ -268,19 +209,109 @@ final class MenuApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
             state = .stopped
             return
         }
-        state = .stopped  // ignore this process's termination callback from here on
+        state = .stopped
         teardownServerPipe()
         process.terminate()
+        let deadline = Date().addingTimeInterval(5)
+        while process.isRunning && Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+        }
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
     }
 
-    // MARK: - Gmail re-authentication
+    // MARK: - Chrome lifecycle
 
-    /// Runs `reader-process auth`, which opens a browser and rewrites token.json.
-    /// Google expires refresh tokens weekly while the OAuth consent screen is in
-    /// Testing mode, so this is a routine chore rather than a one-time setup step.
+    private func openChrome(port: Int) {
+        guard let chrome = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.google.Chrome")
+        else {
+            alert("Can't find Google Chrome", "Install Google Chrome and try again.")
+            NSApp.terminate(nil)
+            return
+        }
+
+        let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let profile = appSupport.appendingPathComponent("Reader Processor/Chrome", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: profile, withIntermediateDirectories: true)
+        } catch {
+            alert("Couldn't prepare Chrome", error.localizedDescription)
+            NSApp.terminate(nil)
+            return
+        }
+
+        // A force-quit can leave this dedicated profile's Chrome alive. Chrome
+        // would hand it the new URL and make our new child exit immediately.
+        if let staleChrome = lockedChromeApplication(profile: profile) {
+            loadingLabel.stringValue = "Closing the previous Chrome window..."
+            staleChrome.terminate()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                if !staleChrome.isTerminated { staleChrome.forceTerminate() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    self?.launchChrome(at: chrome, profile: profile, port: port)
+                }
+            }
+            return
+        }
+
+        launchChrome(at: chrome, profile: profile, port: port)
+    }
+
+    private func launchChrome(at chrome: URL, profile: URL, port: Int) {
+        loadingLabel.stringValue = "Opening Reader Processor in Chrome..."
+        let process = Process()
+        process.executableURL = chrome.appendingPathComponent("Contents/MacOS/Google Chrome")
+        process.arguments = [
+            "--app=http://localhost:\(port)/",
+            "--user-data-dir=\(profile.path)",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-mode",
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] terminated in
+            DispatchQueue.main.async { self?.chromeExited(terminated) }
+        }
+        do {
+            try process.run()
+        } catch {
+            alert("Couldn't open Chrome", error.localizedDescription)
+            NSApp.terminate(nil)
+            return
+        }
+        chromeProcess = process
+        loadingWindow.orderOut(nil)
+        chromeApplication()?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+    }
+
+    private func lockedChromeApplication(profile: URL) -> NSRunningApplication? {
+        let lock = profile.appendingPathComponent("SingletonLock")
+        guard let target = try? FileManager.default.destinationOfSymbolicLink(atPath: lock.path),
+            let pidText = target.split(separator: "-").last,
+            let pid = Int32(pidText),
+            let application = NSRunningApplication(processIdentifier: pid),
+            application.bundleIdentifier == "com.google.Chrome"
+        else { return nil }
+        return application
+    }
+
+    private func chromeApplication() -> NSRunningApplication? {
+        guard let chromeProcess else { return nil }
+        return NSRunningApplication(processIdentifier: chromeProcess.processIdentifier)
+    }
+
+    private func chromeExited(_ process: Process) {
+        guard process === chromeProcess else { return }
+        chromeProcess = nil
+        if !isTerminating { NSApp.terminate(nil) }
+    }
+
+    // MARK: - Gmail authentication
+
     @objc private func reauthenticate() {
-        // Second click cancels: auth.ts waits on a browser redirect with no
-        // timeout, so an abandoned flow would otherwise hang around forever.
         if let running = authProcess, running.isRunning {
             running.terminate()
             authProcess = nil
@@ -288,15 +319,11 @@ final class MenuApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
             return
         }
         guard let tooling = resolveTooling() else { return }
-
         let process = childProcess(tooling, ["auth"])
         let pipe = Pipe()
+        let collected = Collector()
         process.standardOutput = pipe
         process.standardError = pipe
-
-        // Drain incrementally rather than blocking a thread on
-        // readDataToEndOfFile, which never returns if run() throws.
-        let collected = Collector()
         pipe.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else {
@@ -305,20 +332,18 @@ final class MenuApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
             }
             collected.append(chunk)
         }
-
-        process.terminationHandler = { [weak self] proc in
-            let status = proc.terminationStatus
-            let text = collected.text()
+        process.terminationHandler = { [weak self] process in
+            let status = process.terminationStatus
+            let output = collected.text()
             DispatchQueue.main.async {
                 guard let self else { return }
                 pipe.fileHandleForReading.readabilityHandler = nil
-                let cancelled = self.authProcess !== proc
+                let cancelled = self.authProcess !== process
                 self.authProcess = nil
                 self.refreshMenu()
-                if !cancelled { self.authFinished(status: status, output: text) }
+                if !cancelled { self.authFinished(status: status, output: output) }
             }
         }
-
         do {
             try process.run()
         } catch {
@@ -326,7 +351,6 @@ final class MenuApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
             alert("Couldn't start authentication", error.localizedDescription)
             return
         }
-
         authProcess = process
         refreshMenu()
     }
@@ -336,9 +360,6 @@ final class MenuApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
             alert("Authentication failed", output.isEmpty ? "Exit code \(status)." : output)
             return
         }
-        // auth.ts writes with mode 0600, but Node ignores `mode` when the file
-        // already exists — so an existing token keeps whatever permissions it had.
-        // It grants read and send access to the account, so pin it down here.
         var note = ""
         if let path = Self.parseTokenPath(output) {
             do {
@@ -349,10 +370,10 @@ final class MenuApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
             }
         }
         alert("Gmail connected", "Reader Processor can now access your newsletters.\(note)")
-        webView.reload()
+        chromeApplication()?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
     }
 
-    // MARK: - Window and menus
+    // MARK: - Window and menu
 
     private func buildMenu() {
         let mainMenu = NSMenu()
@@ -368,120 +389,59 @@ final class MenuApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
         about.target = NSApp
         appMenu.addItem(about)
         appMenu.addItem(.separator())
-
         statusLine.isEnabled = false
         appMenu.addItem(statusLine)
         authItem.target = self
         appMenu.addItem(authItem)
-        stopItem.target = self
-        appMenu.addItem(stopItem)
         appMenu.addItem(.separator())
-
-        let hide = NSMenuItem(title: "Hide Reader Processor", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        hide.target = NSApp
-        appMenu.addItem(hide)
-        let quit = NSMenuItem(title: "Quit Reader Processor", action: #selector(quit), keyEquivalent: "q")
+        let quit = NSMenuItem(
+            title: "Quit Reader Processor", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         appMenu.addItem(quit)
-
-        let viewItem = NSMenuItem()
-        mainMenu.addItem(viewItem)
-        let viewMenu = NSMenu(title: "View")
-        viewItem.submenu = viewMenu
-        let reload = NSMenuItem(title: "Reload Dashboard", action: #selector(reloadDashboard), keyEquivalent: "r")
-        reload.target = self
-        viewMenu.addItem(reload)
-        viewMenu.addItem(NSMenuItem(
-            title: "Enter Full Screen",
-            action: #selector(NSWindow.toggleFullScreen(_:)),
-            keyEquivalent: "f"))
-
         NSApp.mainMenu = mainMenu
     }
 
-    private func buildWindow() {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .default()
-        webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.navigationDelegate = self
-        webView.uiDelegate = self
-        webView.autoresizingMask = [.width, .height]
-
-        loadingView = NSView()
-        loadingView.wantsLayer = true
-        loadingView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        loadingLabel = NSTextField(labelWithString: "Starting Reader Processor…")
+    private func buildLoadingWindow() {
+        loadingLabel = NSTextField(labelWithString: "Starting Reader Processor...")
         loadingLabel.font = .systemFont(ofSize: 17, weight: .medium)
         loadingLabel.textColor = .secondaryLabelColor
-        loadingLabel.translatesAutoresizingMaskIntoConstraints = false
-        loadingView.addSubview(loadingLabel)
-        NSLayoutConstraint.activate([
-            loadingLabel.centerXAnchor.constraint(equalTo: loadingView.centerXAnchor),
-            loadingLabel.centerYAnchor.constraint(equalTo: loadingView.centerYAnchor),
-        ])
+        loadingLabel.alignment = .center
+        loadingLabel.frame = NSRect(x: 30, y: 55, width: 360, height: 24)
 
-        window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 140))
+        content.addSubview(loadingLabel)
+        loadingWindow = NSWindow(
+            contentRect: content.bounds,
+            styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false)
-        window.title = "Reader Processor"
-        window.minSize = NSSize(width: 820, height: 560)
-        window.setFrameAutosaveName("ReaderProcessorMainWindow")
-        window.contentView = loadingView
-        window.center()
+        loadingWindow.title = "Reader Processor"
+        loadingWindow.contentView = content
+        loadingWindow.center()
     }
 
-    private func showWindow() {
-        window.makeKeyAndOrderFront(nil)
+    private func showLoadingWindow() {
+        loadingLabel.stringValue = "Starting Reader Processor..."
+        loadingWindow.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func openWindow(port: Int) {
-        let url = URL(string: "http://localhost:\(port)/")!
-        if window.contentView !== webView { window.contentView = webView }
-        webView.load(URLRequest(url: url))
-        showWindow()
+    private func refreshMenu() {
+        switch state {
+        case .stopped: statusLine.title = "Server: stopped"
+        case .starting: statusLine.title = "Server: starting..."
+        case .running(_, let port): statusLine.title = "Server: running :\(port)"
+        }
+        let authenticating = authProcess?.isRunning == true
+        authItem.title = authenticating ? "Cancel authentication" : "Re-authenticate Gmail..."
     }
 
-    // Links intentionally opened in a new page belong in the default browser,
-    // not in the dashboard's single native view.
-    func webView(
-        _ webView: WKWebView,
-        createWebViewWith configuration: WKWebViewConfiguration,
-        for navigationAction: WKNavigationAction,
-        windowFeatures: WKWindowFeatures
-    ) -> WKWebView? {
-        if let url = navigationAction.request.url { NSWorkspace.shared.open(url) }
-        return nil
-    }
-
-    func webView(
-        _ webView: WKWebView,
-        decidePolicyFor navigationAction: WKNavigationAction,
-        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
-    ) {
-        if navigationAction.request.url?.scheme == "reader-processor" {
-            decisionHandler(.cancel)
-            if authProcess?.isRunning != true { reauthenticate() }
-            return
-        }
-        if let url = navigationAction.request.url,
-            navigationAction.navigationType == .linkActivated,
-            url.host != "localhost",
-            url.host != "127.0.0.1"
-        {
-            NSWorkspace.shared.open(url)
-            decisionHandler(.cancel)
-            return
-        }
-        decisionHandler(.allow)
+    @objc private func quit() {
+        NSApp.terminate(nil)
     }
 
     // MARK: - Helpers
 
-    /// Accumulates child output across reads; the handler fires on a dispatch
-    /// queue, so the buffer needs its own lock.
     private final class Collector {
         private let lock = NSLock()
         private var data = Data()
@@ -527,7 +487,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUI
 }
 
 let app = NSApplication.shared
-let delegate = MenuApp()
+let delegate = LauncherApp()
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.run()

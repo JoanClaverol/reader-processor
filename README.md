@@ -78,10 +78,10 @@ pnpm run build:macos
 ```
 
 Open **Reader Processor** from Spotlight, the Dock, or Finder. It starts the
-local server and displays the dashboard in its own app window; quitting the app
-stops the server. The app currently launches the checkout at
-`~/Developer/reader-processor`, so update `repoPath` in
-`macos/ReaderProcessorMenu.swift` before building if yours lives elsewhere.
+local server and opens the dashboard in a dedicated Google Chrome app window.
+The launcher uses a separate Chrome profile so quitting that window with Cmd-Q
+also stops the server and the launcher. The build records the current checkout
+path in the app bundle, so rebuild the app after moving the repository.
 
 The UI is three columns: newsletters, the selected newsletter's items, and a
 preview of the selected content. Click a newsletter to preview its body; click

@@ -31,6 +31,7 @@ const modalContent = $("modal-content");
 
 let newsletters: Newsletter[] = [];
 let activeId: string | null = null;
+let awaitingAuthentication = false;
 const viewed = new Set<string>(
   JSON.parse(localStorage.getItem("viewedEmails") ?? "[]") as string[],
 );
@@ -118,6 +119,7 @@ async function loadNewsletters(): Promise<void> {
       const button = document.createElement("button");
       button.textContent = "Sign in with Google";
       button.addEventListener("click", () => {
+        awaitingAuthentication = true;
         window.location.href = "reader-processor://authenticate";
       });
       box.append(title, detail, button);
@@ -127,6 +129,7 @@ async function loadNewsletters(): Promise<void> {
     emailList.appendChild(box);
     return;
   }
+  awaitingAuthentication = false;
   newsletters = data.newsletters;
   sendBtn.title = `Deliver to ${data.kindle_email}`;
   renderEmailList();
@@ -810,3 +813,8 @@ modal.addEventListener("click", (e) => {
 
 initResizers();
 loadNewsletters();
+// Returning from the native OAuth flow focuses the Chrome app window again.
+// Refresh then so a newly written token takes effect without a manual reload.
+window.addEventListener("focus", () => {
+  if (awaitingAuthentication) void loadNewsletters();
+});
