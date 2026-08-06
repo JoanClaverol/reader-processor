@@ -273,6 +273,9 @@ body.resizing .col { transition: none; }
   border: 1px solid var(--fail-soft); background: var(--fail-soft);
   border-radius: var(--r-md); color: var(--fail);
 }
+.error-box strong { display: block; color: var(--text-1); font-size: .92rem; }
+.error-box p { color: var(--text-2); line-height: 1.45; margin: .45rem 0 .75rem; }
+.error-box button { width: 100%; }
 
 /* ---------- toasts ---------- */
 #toasts {

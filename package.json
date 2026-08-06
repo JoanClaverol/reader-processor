@@ -13,6 +13,7 @@
   "packageManager": "pnpm@11.15.1",
   "scripts": {
     "build": "tsc -p frontend/tsconfig.json && tsc -p server/tsconfig.json",
+    "build:macos": "pnpm run build && ./macos/build.sh",
     "prepare": "pnpm run build",
     "start": "node bin/reader-process.js",
     "auth": "node bin/reader-process.js auth"

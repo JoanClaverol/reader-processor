@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="160" y1="96" x2="864" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#163B59"/>
+      <stop offset="1" stop-color="#071B2B"/>
+    </linearGradient>
+    <linearGradient id="paper" x1="302" y1="260" x2="702" y2="790" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFDF4"/>
+      <stop offset="1" stop-color="#E8E1CC"/>
+    </linearGradient>
+    <filter id="shadow" x="100" y="90" width="824" height="850" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="30" stdDeviation="28" flood-color="#000" flood-opacity=".35"/>
+    </filter>
+  </defs>
+  <rect x="72" y="72" width="880" height="880" rx="198" fill="url(#background)"/>
+  <circle cx="796" cy="214" r="54" fill="#F0A14A"/>
+  <g filter="url(#shadow)">
+    <path d="M222 282c0-35 29-64 64-64h226v574H286c-35 0-64-29-64-64V282Z" fill="#D86D45"/>
+    <path d="M512 218h226c35 0 64 29 64 64v446c0 35-29 64-64 64H512V218Z" fill="#B84B36"/>
+    <path d="M270 290c0-20 16-36 36-36 79 0 148 27 206 80v422c-58-42-127-64-206-64-20 0-36-16-36-36V290Z" fill="url(#paper)"/>
+    <path d="M754 290c0-20-16-36-36-36-79 0-148 27-206 80v422c58-42 127-64 206-64 20 0 36-16 36-36V290Z" fill="#F7F2E4"/>
+    <path d="M512 334v422" stroke="#C8BFA8" stroke-width="12"/>
+    <g fill="#173B58" opacity=".72">
+      <rect x="326" y="370" width="132" height="18" rx="9"/>
+      <rect x="326" y="422" width="132" height="18" rx="9"/>
+      <rect x="326" y="474" width="106" height="18" rx="9"/>
+      <rect x="566" y="370" width="132" height="18" rx="9"/>
+      <rect x="566" y="422" width="132" height="18" rx="9"/>
+      <rect x="566" y="474" width="106" height="18" rx="9"/>
+    </g>
+  </g>
+</svg>

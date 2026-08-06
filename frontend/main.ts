@@ -110,7 +110,20 @@ async function loadNewsletters(): Promise<void> {
     emailList.innerHTML = "";
     const box = document.createElement("div");
     box.className = "error-box";
-    box.textContent = `Setup needed: ${data.error}`;
+    if (data.code === "gmail_auth_required") {
+      const title = document.createElement("strong");
+      title.textContent = "Connect Gmail to continue";
+      const detail = document.createElement("p");
+      detail.textContent = "Reader Processor needs permission to read your newsletters and send books.";
+      const button = document.createElement("button");
+      button.textContent = "Sign in with Google";
+      button.addEventListener("click", () => {
+        window.location.href = "reader-processor://authenticate";
+      });
+      box.append(title, detail, button);
+    } else {
+      box.textContent = `Setup needed: ${data.error}`;
+    }
     emailList.appendChild(box);
     return;
   }

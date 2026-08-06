@@ -1,11 +1,10 @@
-// ReaderProcessor menu bar app.
+// Reader Processor macOS app.
 //
-// Lives in the menu bar with no Dock icon. "Open dashboard" spawns the Node
-// server on demand (NO_OPEN=1 so the CLI doesn't race us to the browser),
-// reads the port off its stdout, waits for it to answer, then opens the
-// dashboard in a chromeless Chrome window. Quitting stops the server.
+// Owns a native WebKit window and spawns the Node server on demand. Quitting
+// stops the server.
 
 import AppKit
+import WebKit
 
 // Where the checkout lives. Change if you move the repo.
 let repoPath = "\(NSHomeDirectory())/Developer/reader-processor"
@@ -21,7 +20,7 @@ let nodeCandidates = [
 let childPath = (nodeCandidates.map { ($0 as NSString).deletingLastPathComponent } + ["/bin"])
     .joined(separator: ":")
 
-final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class MenuApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
     /// One lifecycle, one variable: a port can't exist without a process, and
     /// "starting" can't disagree with whether something is running.
     private enum State {
@@ -38,7 +37,10 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private var statusItem: NSStatusItem!
+    private var window: NSWindow!
+    private var webView: WKWebView!
+    private var loadingView: NSView!
+    private var loadingLabel: NSTextField!
     private let statusLine = NSMenuItem(title: "Server: stopped", action: nil, keyEquivalent: "")
     private let stopItem = NSMenuItem(
         title: "Stop server", action: #selector(stopServer), keyEquivalent: "")
@@ -51,38 +53,10 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var authProcess: Process?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            button.image = NSImage(
-                systemSymbolName: "book.closed", accessibilityDescription: "reader-processor")
-            button.image?.isTemplate = true
-        }
-
-        let menu = NSMenu()
-        menu.delegate = self
-
-        let open = NSMenuItem(
-            title: "Open dashboard", action: #selector(openDashboard), keyEquivalent: "o")
-        open.target = self
-        menu.addItem(open)
-
-        statusLine.isEnabled = false
-        menu.addItem(statusLine)
-
-        menu.addItem(.separator())
-
-        authItem.target = self
-        menu.addItem(authItem)
-
-        stopItem.target = self
-        menu.addItem(stopItem)
-
-        let quit = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
-
-        statusItem.menu = menu
+        buildMenu()
+        buildWindow()
         refreshMenu()
+        openDashboard()
     }
 
     /// The app launches at login and never quits, so picking it in Spotlight is
@@ -91,6 +65,10 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         openDashboard()
         return true
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -105,14 +83,14 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Menu state
 
-    func menuWillOpen(_ menu: NSMenu) {
-        refreshMenu()
-    }
-
     private func refreshMenu() {
         switch state {
-        case .stopped: statusLine.title = "Server: stopped"
-        case .starting: statusLine.title = "Server: starting…"
+        case .stopped:
+            statusLine.title = "Server: stopped"
+            loadingLabel?.stringValue = "Starting Reader Processor…"
+        case .starting:
+            statusLine.title = "Server: starting…"
+            loadingLabel?.stringValue = "Starting Reader Processor…"
         case .running(_, let port): statusLine.title = "Server: running :\(port)"
         }
         stopItem.isEnabled = state.process != nil
@@ -126,6 +104,7 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Actions
 
     @objc private func openDashboard() {
+        showWindow()
         switch state {
         case .running(_, let port):
             openWindow(port: port)
@@ -142,6 +121,10 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    @objc private func reloadDashboard() {
+        webView.reload()
     }
 
     // MARK: - Server lifecycle
@@ -365,29 +348,134 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 note = "\n\nCouldn't restrict permissions on \(path): \(error.localizedDescription)"
             }
         }
-        alert("Gmail re-authenticated", "Reload the dashboard to pick it up.\(note)")
+        alert("Gmail connected", "Reader Processor can now access your newsletters.\(note)")
+        webView.reload()
     }
 
-    // MARK: - Window
+    // MARK: - Window and menus
+
+    private func buildMenu() {
+        let mainMenu = NSMenu()
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu(title: "Reader Processor")
+        appItem.submenu = appMenu
+
+        let about = NSMenuItem(
+            title: "About Reader Processor",
+            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            keyEquivalent: "")
+        about.target = NSApp
+        appMenu.addItem(about)
+        appMenu.addItem(.separator())
+
+        statusLine.isEnabled = false
+        appMenu.addItem(statusLine)
+        authItem.target = self
+        appMenu.addItem(authItem)
+        stopItem.target = self
+        appMenu.addItem(stopItem)
+        appMenu.addItem(.separator())
+
+        let hide = NSMenuItem(title: "Hide Reader Processor", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        hide.target = NSApp
+        appMenu.addItem(hide)
+        let quit = NSMenuItem(title: "Quit Reader Processor", action: #selector(quit), keyEquivalent: "q")
+        quit.target = self
+        appMenu.addItem(quit)
+
+        let viewItem = NSMenuItem()
+        mainMenu.addItem(viewItem)
+        let viewMenu = NSMenu(title: "View")
+        viewItem.submenu = viewMenu
+        let reload = NSMenuItem(title: "Reload Dashboard", action: #selector(reloadDashboard), keyEquivalent: "r")
+        reload.target = self
+        viewMenu.addItem(reload)
+        viewMenu.addItem(NSMenuItem(
+            title: "Enter Full Screen",
+            action: #selector(NSWindow.toggleFullScreen(_:)),
+            keyEquivalent: "f"))
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    private func buildWindow() {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = self
+        webView.uiDelegate = self
+        webView.autoresizingMask = [.width, .height]
+
+        loadingView = NSView()
+        loadingView.wantsLayer = true
+        loadingView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        loadingLabel = NSTextField(labelWithString: "Starting Reader Processor…")
+        loadingLabel.font = .systemFont(ofSize: 17, weight: .medium)
+        loadingLabel.textColor = .secondaryLabelColor
+        loadingLabel.translatesAutoresizingMaskIntoConstraints = false
+        loadingView.addSubview(loadingLabel)
+        NSLayoutConstraint.activate([
+            loadingLabel.centerXAnchor.constraint(equalTo: loadingView.centerXAnchor),
+            loadingLabel.centerYAnchor.constraint(equalTo: loadingView.centerYAnchor),
+        ])
+
+        window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false)
+        window.title = "Reader Processor"
+        window.minSize = NSSize(width: 820, height: 560)
+        window.setFrameAutosaveName("ReaderProcessorMainWindow")
+        window.contentView = loadingView
+        window.center()
+    }
+
+    private func showWindow() {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     private func openWindow(port: Int) {
         let url = URL(string: "http://localhost:\(port)/")!
+        if window.contentView !== webView { window.contentView = webView }
+        webView.load(URLRequest(url: url))
+        showWindow()
+    }
 
-        // --app gives a window with no tab strip or address bar. Ask the
-        // workspace where Chrome is rather than assuming /Applications: a
-        // per-user install lives under ~/Applications.
-        let chrome = NSWorkspace.shared.urlForApplication(
-            withBundleIdentifier: "com.google.Chrome")
-        guard let chrome else {
-            NSWorkspace.shared.open(url)
+    // Links intentionally opened in a new page belong in the default browser,
+    // not in the dashboard's single native view.
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        if let url = navigationAction.request.url { NSWorkspace.shared.open(url) }
+        return nil
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        if navigationAction.request.url?.scheme == "reader-processor" {
+            decisionHandler(.cancel)
+            if authProcess?.isRunning != true { reauthenticate() }
             return
         }
-        let config = NSWorkspace.OpenConfiguration()
-        config.arguments = ["--app=\(url.absoluteString)"]
-        config.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: chrome, configuration: config) { _, error in
-            if error != nil { DispatchQueue.main.async { NSWorkspace.shared.open(url) } }
+        if let url = navigationAction.request.url,
+            navigationAction.navigationType == .linkActivated,
+            url.host != "localhost",
+            url.host != "127.0.0.1"
+        {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+            return
         }
+        decisionHandler(.allow)
     }
 
     // MARK: - Helpers
@@ -441,5 +529,5 @@ final class MenuApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
 let app = NSApplication.shared
 let delegate = MenuApp()
 app.delegate = delegate
-app.setActivationPolicy(.accessory)
+app.setActivationPolicy(.regular)
 app.run()

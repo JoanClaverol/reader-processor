@@ -43,6 +43,25 @@ export function gmailClient(): Gmail {
   return google.gmail({ version: "v1", auth: getAuth() });
 }
 
+/** Whether retrying the request requires a new interactive OAuth grant. */
+export function isAuthError(error: unknown): boolean {
+  const detail = error as {
+    code?: unknown;
+    response?: { status?: unknown; data?: { error?: unknown } };
+  };
+  const message = String((error as Error)?.message ?? error).toLowerCase();
+  const apiError = String(detail.response?.data?.error ?? "").toLowerCase();
+  return (
+    detail.code === 401 ||
+    detail.response?.status === 401 ||
+    message.includes("not authenticated with gmail") ||
+    message.includes("invalid_grant") ||
+    message.includes("invalid credentials") ||
+    message.includes("login required") ||
+    apiError.includes("invalid_grant")
+  );
+}
+
 export async function searchMessageIds(g: Gmail, q: string): Promise<string[]> {
   const ids: string[] = [];
   let pageToken: string | undefined;

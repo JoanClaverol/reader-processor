@@ -111,7 +111,11 @@ app.get("/api/newsletters", async (_req, res) => {
       days_back: config.daysBack,
     });
   } catch (e) {
-    res.status(503).json({ error: String((e as Error).message ?? e) });
+    const authRequired = gmail.isAuthError(e);
+    res.status(authRequired ? 401 : 503).json({
+      error: String((e as Error).message ?? e),
+      code: authRequired ? "gmail_auth_required" : "setup_required",
+    });
   }
 });
 

@@ -49,6 +49,9 @@ pnpm add --global ./ # puts `reader-process` on your PATH (linked to this checko
    reader-process auth
    ```
 
+   In the macOS app, you can instead use the **Sign in with Google** button
+   shown in the dashboard when authentication is missing or expired.
+
 5. **Gmail label**: the app lists emails carrying the `newsletter` label
    (configurable as `source_label`). Set up a Gmail filter that applies it to
    your newsletter subscriptions.
@@ -65,6 +68,20 @@ dashboard in your browser (set `NO_OPEN=1` to skip the auto-open).
 Tick the newsletters/links you want, hit send.
 Sent items are marked ✓, the source email gets a `kindle-sent` label in Gmail,
 and `/log` shows the send history (stored in the `data/` SQLite db).
+
+### macOS app
+
+Build and install the native dashboard in `~/Applications`:
+
+```sh
+pnpm run build:macos
+```
+
+Open **Reader Processor** from Spotlight, the Dock, or Finder. It starts the
+local server and displays the dashboard in its own app window; quitting the app
+stops the server. The app currently launches the checkout at
+`~/Developer/reader-processor`, so update `repoPath` in
+`macos/ReaderProcessorMenu.swift` before building if yours lives elsewhere.
 
 The UI is three columns: newsletters, the selected newsletter's items, and a
 preview of the selected content. Click a newsletter to preview its body; click
