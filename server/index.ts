@@ -199,6 +199,32 @@ app.post("/api/send", async (req, res) => {
   const results: SendResult[] = [];
   const touched = new Set<string>();
 
+  // The book is in Amazon's hands before this row is ever written, so a failed
+  // write must never be reported as a failed send. It used to be: recordSent
+  // sat inside the same try as sendEpub, and that catch called recordSent
+  // again, so a database that refused one write refused both, the second throw
+  // escaped the handler, and a delivered book left no row at all — which is
+  // how a real Kindle bounce later arrived with nothing to match it against.
+  // Same rule as the labelling below: bookkeeping reports, never overrules.
+  const logSent = (
+    item: SendItem,
+    title: string,
+    status: string,
+    detail = "",
+    filename: string | null = null,
+  ) => {
+    try {
+      store.recordSent(item.msg_id, item.kind, item.url ?? null, title, status, detail, filename);
+    } catch (e) {
+      results.push({
+        title: "send log",
+        ok: false,
+        warning: true,
+        detail: `couldn't record "${title}" as ${status} — ${String((e as Error).message ?? e)}`,
+      });
+    }
+  };
+
   // Resolve every item to a section (title + faithful html + source).
   const resolved: { item: SendItem; section: EpubSection; author: string }[] = [];
   for (const item of items) {
@@ -225,7 +251,7 @@ app.post("/api/send", async (req, res) => {
     } catch (e) {
       const shown = title ?? url ?? item.msg_id;
       const detail = String((e as Error).message ?? e);
-      store.recordSent(item.msg_id, item.kind, item.url ?? null, shown, "error", detail);
+      logSent(item, shown, "error", detail);
       results.push({ title: shown, ok: false, detail });
     }
   }
@@ -234,34 +260,40 @@ app.post("/api/send", async (req, res) => {
     // One book, each item a chapter with its own TOC entry.
     const date = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
     const bookTitle = `Reading digest — ${date}`;
+    // Only the build and the send belong in the try — see logSent above.
+    let filename: string | null = null;
+    let failure = "";
     try {
       const epub = await buildEpub(bookTitle, "reader-processor", resolved.map((r) => r.section));
-      const filename = await gmail.sendEpub(g, config.kindleEmail, bookTitle, epub);
-      for (const r of resolved) {
-        store.recordSent(r.item.msg_id, r.item.kind, r.item.url ?? null, r.section.title, "sent", `in "${bookTitle}"`, filename);
-        touched.add(r.item.msg_id);
-        results.push({ title: r.section.title, ok: true, detail: `chapter of "${bookTitle}"` });
-      }
+      filename = await gmail.sendEpub(g, config.kindleEmail, bookTitle, epub);
     } catch (e) {
-      const detail = String((e as Error).message ?? e);
-      for (const r of resolved) {
-        store.recordSent(r.item.msg_id, r.item.kind, r.item.url ?? null, r.section.title, "error", detail);
-        results.push({ title: r.section.title, ok: false, detail });
+      failure = String((e as Error).message ?? e);
+    }
+    for (const r of resolved) {
+      if (filename === null) {
+        logSent(r.item, r.section.title, "error", failure);
+        results.push({ title: r.section.title, ok: false, detail: failure });
+        continue;
       }
+      logSent(r.item, r.section.title, "sent", `in "${bookTitle}"`, filename);
+      touched.add(r.item.msg_id);
+      results.push({ title: r.section.title, ok: true, detail: `chapter of "${bookTitle}"` });
     }
   } else {
     for (const r of resolved) {
+      let filename: string;
       try {
         const epub = await buildEpub(r.section.title, r.author, [r.section]);
-        const filename = await gmail.sendEpub(g, config.kindleEmail, r.section.title, epub);
-        store.recordSent(r.item.msg_id, r.item.kind, r.item.url ?? null, r.section.title, "sent", "", filename);
-        touched.add(r.item.msg_id);
-        results.push({ title: r.section.title, ok: true, detail: "" });
+        filename = await gmail.sendEpub(g, config.kindleEmail, r.section.title, epub);
       } catch (e) {
         const detail = String((e as Error).message ?? e);
-        store.recordSent(r.item.msg_id, r.item.kind, r.item.url ?? null, r.section.title, "error", detail);
+        logSent(r.item, r.section.title, "error", detail);
         results.push({ title: r.section.title, ok: false, detail });
+        continue;
       }
+      logSent(r.item, r.section.title, "sent", "", filename);
+      touched.add(r.item.msg_id);
+      results.push({ title: r.section.title, ok: true, detail: "" });
     }
   }
 
