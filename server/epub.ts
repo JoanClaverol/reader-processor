@@ -137,6 +137,7 @@ function stripKindleIncompatible(doc: Document): void {
   doc
     .querySelectorAll("audio, source, canvas, embed, iframe, object, script, svg, form")
     .forEach((el) => el.remove());
+  flattenLayoutTables(doc);
   // Amazon's converter crashes (E999) when an attribute value contains '>'
   // and other attributes follow it — even as the legal XHTML entity &gt;;
   // its tokenizer apparently decodes entities before splitting tags.
@@ -148,6 +149,50 @@ function stripKindleIncompatible(doc: Document): void {
       }
     }
   });
+}
+
+/**
+ * Newsletter bodies are laid out with nested <table> scaffolding, and Amazon's
+ * converter rejects a book that contains it (E013) instead of ignoring it.
+ * Confirmed 2026-08-18 by sending one Chartbook issue six ways: dropping the
+ * images, unwrapping the <figure>s and stripping every data-/aria-/role
+ * attribute all still bounced; flattening the tables was the only variant that
+ * converted. Nesting depth is not the trigger — La Bonilista nests seven deep
+ * and has always gone through — so the rule here is by purpose, not by shape:
+ * a table with no <th> and no <caption> of its own is scaffolding, and its
+ * cells become blocks, which is what a 6" screen wants anyway. Real data
+ * tables are left alone.
+ */
+function flattenLayoutTables(doc: Document): void {
+  const tables = [...doc.querySelectorAll("table")];
+  // A <th> inside a nested table says nothing about the table wrapping it, so
+  // ownership is decided by the nearest enclosing table, not by descent.
+  const layout = new Set(
+    tables.filter(
+      (t) => ![...t.querySelectorAll("th, caption")].some((el) => el.closest("table") === t),
+    ),
+  );
+  if (layout.size === 0) return;
+
+  const owned = (selector: string) =>
+    [...doc.querySelectorAll(selector)].filter((el) => {
+      const table = el.closest("table");
+      return table !== null && layout.has(table);
+    });
+
+  // Cells first, then rows, then the tables themselves: every step above
+  // relies on closest("table") still resolving, so the tables go last.
+  for (const cell of owned("td")) {
+    const div = doc.createElement("div");
+    div.append(...[...cell.childNodes]);
+    cell.replaceWith(div);
+  }
+  for (const el of owned("thead, tbody, tfoot, tr, colgroup, col")) {
+    el.replaceWith(...[...el.childNodes]);
+  }
+  for (const table of tables) {
+    if (layout.has(table)) table.replaceWith(...[...table.childNodes]);
+  }
 }
 
 // Precautionary: the largest Kindle screen is 1860×2480, so anything
