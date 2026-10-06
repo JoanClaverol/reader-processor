@@ -44,6 +44,8 @@ export interface ExtractedLink {
   junk: boolean;
 }
 
+const NOT_A_DESTINATION = /^(utm_|ref$|referr?er$|source$|via$|share|og_|canonical$)/i;
+
 /** Resolve tracking-wrapper URLs (TLDR, Mailchimp-style) to their destination. */
 export function unwrapTracking(url: string): string {
   let parsed: URL;
@@ -52,7 +54,11 @@ export function unwrapTracking(url: string): string {
   } catch {
     return url;
   }
-  for (const value of parsed.searchParams.values()) {
+  for (const [key, value] of parsed.searchParams) {
+    // A real article can carry a URL in an attribution param
+    // (…?ref=https://x.com); that names where the reader came from, not where
+    // the link goes, so it must not replace the article.
+    if (NOT_A_DESTINATION.test(key)) continue;
     if (value.startsWith("http://") || value.startsWith("https://")) return value;
   }
   for (const segment of parsed.pathname.split("/")) {
