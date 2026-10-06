@@ -129,7 +129,8 @@ frontend (`frontend/`), built together by `pnpm run build` (which
 ## Notes
 
 - Message bodies are cached in SQLite, so only new newsletters hit the Gmail
-  API on page load.
+  API on page load. Cached messages and articles older than 60 days are pruned
+  at startup; the send log is kept.
 - If an article fails to extract (paywall, JS-only page), the result page shows
   the error and nothing is sent for that item.
 - Junk-link filtering lives in `JUNK_TEXT` / `JUNK_HOSTS` in
