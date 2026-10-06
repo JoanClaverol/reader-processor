@@ -550,7 +550,7 @@ async function postSend(items: SelItem[], bundle: boolean): Promise<SendResult[]
       bundle,
     }),
   });
-  const data = await resp.json();
+  const data = await readJson(resp);
   if (!resp.ok) throw new Error(data.error ?? "server error");
   return data.results as SendResult[];
 }
@@ -790,11 +790,17 @@ function initResizers(): void {
 
 $("log-btn").addEventListener("click", async () => {
   const resp = await fetch("/api/log");
-  const data = await resp.json();
+  const data = await readJson(resp);
+  if (!resp.ok) {
+    modalContent.innerHTML = `<h3>Send log</h3><p class="fail">Couldn't load the log: ${escapeHtml(String(data.error ?? "server error"))}</p>`;
+    closeGuard = null;
+    modal.showModal();
+    return;
+  }
   interface LogEntry { created_at: string; kind: string; title: string; status: string; detail: string }
   const rows = (data.entries as LogEntry[]).map((e) => `
     <tr><td class="${e.status === "sent" ? "ok" : "fail"}">${e.status === "sent" ? "✓" : "✗"}</td>
-    <td>${localDateTime(parseUtc(e.created_at))}</td><td>${e.kind}</td>
+    <td>${localDateTime(parseUtc(e.created_at))}</td><td>${escapeHtml(e.kind)}</td>
     <td>${escapeHtml(e.title)}${e.detail ? `<br><small>${escapeHtml(e.detail)}</small>` : ""}</td></tr>`);
   modalContent.innerHTML = `<h3>Send log</h3><table>${rows.join("") || "<tr><td>Nothing sent yet.</td></tr>"}</table>`;
   closeGuard = null; // this content replaced whatever the guard was protecting

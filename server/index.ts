@@ -34,6 +34,14 @@ app.use((req, res, next) => {
     }
     if (!ok) return res.status(403).json({ error: "Forbidden: cross-origin request" });
   }
+  // Origin is absent on cross-site GETs, so the check above can't stop another
+  // website from making the server fetch arbitrary URLs (including LAN hosts)
+  // via /api/preview/article. Browsers label every such request with
+  // Sec-Fetch-Site; only the dashboard's own fetches say same-origin.
+  const site = req.headers["sec-fetch-site"];
+  if (req.path.startsWith("/api/") && (site === "cross-site" || site === "same-site")) {
+    return res.status(403).json({ error: "Forbidden: cross-site request" });
+  }
   next();
 });
 // A pasted article arrives as one JSON body, well past the 100kb default.
@@ -191,11 +199,34 @@ interface SendItem {
   url?: string | null;
 }
 
+function isSendItem(x: unknown): x is SendItem {
+  const item = x as Partial<SendItem> | null;
+  return (
+    typeof item?.msg_id === "string" &&
+    (item.kind === "body" || (item.kind === "link" && typeof item.url === "string"))
+  );
+}
+
 app.post("/api/send", async (req, res) => {
-  const items: SendItem[] = req.body?.items ?? [];
+  const items: unknown[] = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.every(isSendItem)) {
+    return res.status(400).json({ error: "each item needs a msg_id and kind body|link (links need a url)" });
+  }
   const bundle: boolean = !!req.body?.bundle && items.length > 1;
-  const config = loadConfig();
-  const g = gmail.gmailClient();
+  // Setup problems (no config, no token) must reach the dashboard as JSON, not
+  // as Express's HTML error page.
+  let config: Config;
+  let g: gmail.Gmail;
+  try {
+    config = loadConfig();
+    g = gmail.gmailClient();
+  } catch (e) {
+    const authRequired = gmail.isAuthError(e);
+    return res.status(authRequired ? 401 : 503).json({
+      error: String((e as Error).message ?? e),
+      code: authRequired ? "gmail_auth_required" : "setup_required",
+    });
+  }
   const results: SendResult[] = [];
   const touched = new Set<string>();
 
@@ -239,7 +270,7 @@ app.post("/api/send", async (req, res) => {
           author: parseSender(msg.sender),
         });
       } else {
-        const article = await getArticleCached(item.url!);
+        const article = await getArticleCached(item.url as string);
         title = article.title;
         url = article.url;
         resolved.push({
