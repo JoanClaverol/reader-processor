@@ -86,6 +86,18 @@ async function readJson(resp: Response): Promise<Record<string, any>> {
   }
 }
 
+// The server stores UTC timestamps without a zone suffix ("2026-10-05T23:30:00"),
+// which Date would otherwise parse as local time — shifting every card by the
+// UTC offset and filing late-night mail under the wrong day.
+function parseUtc(iso: string): Date {
+  return new Date(/Z|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z");
+}
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const localTime = (d: Date) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+const localDateTime = (d: Date) =>
+  `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${localTime(d)}`;
+
 function updateSendBtn(): void {
   sendCount.textContent = String(selected.size);
   sendBtn.disabled = selected.size === 0;
@@ -95,7 +107,7 @@ function updateSendBtn(): void {
 
 function dayLabel(iso: string): string {
   if (!iso) return "Unknown date";
-  const d = new Date(iso);
+  const d = parseUtc(iso);
   const today = new Date();
   const yesterday = new Date(today.getTime() - 86_400_000);
   const sameDay = (a: Date, b: Date) => a.toDateString() === b.toDateString();
@@ -183,7 +195,7 @@ function emailCard(nl: Newsletter): HTMLElement {
   card.dataset.emailId = nl.id;
   const sentCount = nl.links.filter((l) => l.sent).length + (nl.body_sent ? 1 : 0);
   const linkCount = nl.links.filter((l) => !l.junk).length;
-  const time = nl.date_iso ? nl.date_iso.slice(11, 16) : "";
+  const time = nl.date_iso ? localTime(parseUtc(nl.date_iso)) : "";
   const unread = !viewed.has(nl.id) && !isProcessed(nl);
   card.innerHTML = `
     <div class="sender">${unread ? '<span class="unread-dot"></span>' : ""}<span class="sender-name"></span></div>
@@ -782,7 +794,7 @@ $("log-btn").addEventListener("click", async () => {
   interface LogEntry { created_at: string; kind: string; title: string; status: string; detail: string }
   const rows = (data.entries as LogEntry[]).map((e) => `
     <tr><td class="${e.status === "sent" ? "ok" : "fail"}">${e.status === "sent" ? "✓" : "✗"}</td>
-    <td>${e.created_at.replace("T", " ")}</td><td>${e.kind}</td>
+    <td>${localDateTime(parseUtc(e.created_at))}</td><td>${e.kind}</td>
     <td>${escapeHtml(e.title)}${e.detail ? `<br><small>${escapeHtml(e.detail)}</small>` : ""}</td></tr>`);
   modalContent.innerHTML = `<h3>Send log</h3><table>${rows.join("") || "<tr><td>Nothing sent yet.</td></tr>"}</table>`;
   closeGuard = null; // this content replaced whatever the guard was protecting
