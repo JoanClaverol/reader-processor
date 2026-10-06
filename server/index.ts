@@ -17,8 +17,17 @@ app.disable("x-powered-by");
 // The dashboard can read the user's email, so it must only ever answer the
 // user's own browser: reject any request whose Host header isn't a loopback
 // name (defeats DNS rebinding) and any state-changing request originating
-// from another website.
-const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+// from another website. READER_PROCESSOR_HOSTS (comma-separated) adds names
+// for a trusted private proxy, e.g. a `tailscale serve` *.ts.net hostname.
+const LOCAL_HOSTS = new Set([
+  "localhost",
+  "127.0.0.1",
+  "[::1]",
+  ...(process.env.READER_PROCESSOR_HOSTS ?? "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean),
+]);
 app.use((req, res, next) => {
   const host = (req.headers.host ?? "").replace(/:\d+$/, "");
   if (!LOCAL_HOSTS.has(host)) {
