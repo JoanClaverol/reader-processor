@@ -257,45 +257,81 @@ function isProgressiveJpeg(buf: Buffer): boolean {
   return false;
 }
 
+const IMAGE_CONCURRENCY = 4;
+// Cap on attempts, not just successes: a newsletter full of dead tracker
+// images used to cost 20 s apiece, one after another.
+const MAX_IMAGE_ATTEMPTS = MAX_IMAGES * 2;
+
+type Fetched = { buf: Buffer; mediaType: string; ext: string } | null;
+
+/** Download with a size cap enforced while streaming, not after buffering. */
+async function fetchImage(src: string): Promise<Fetched> {
+  try {
+    const res = await fetch(src, {
+      headers: FETCH_HEADERS,
+      redirect: "follow",
+      signal: AbortSignal.timeout(20_000),
+    });
+    const ct = (res.headers.get("content-type") ?? "").split(";")[0].trim();
+    const declared = Number(res.headers.get("content-length") ?? 0);
+    if (!res.ok || !ct.startsWith("image/") || declared > MAX_IMAGE_BYTES || !res.body) {
+      await res.body?.cancel().catch(() => {});
+      return null;
+    }
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_IMAGE_BYTES) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+    return await kindleSafeImage(Buffer.concat(chunks), ct);
+  } catch {
+    return null;
+  }
+}
+
 async function embedImages(
   doc: Document, images: Map<string, ImageRec>, oebps: JSZip, counter: { n: number },
 ): Promise<void> {
   const imgs = [...doc.querySelectorAll("img")];
+  for (const img of imgs) img.removeAttribute("srcset");
+
+  // Fetch each new source once, a few at a time, in document order.
+  const pending = [
+    ...new Set(
+      imgs.map((img) => img.getAttribute("src") ?? "")
+        .filter((src) => /^https?:/i.test(src) && !images.has(src)),
+    ),
+  ].slice(0, MAX_IMAGE_ATTEMPTS);
+  const fetched = new Map<string, Fetched>();
+  let next = 0;
+  const worker = async () => {
+    while (next < pending.length) {
+      const src = pending[next++];
+      fetched.set(src, await fetchImage(src));
+    }
+  };
+  await Promise.all(Array.from({ length: IMAGE_CONCURRENCY }, worker));
+
   for (const img of imgs) {
     const src = img.getAttribute("src") ?? "";
-    img.removeAttribute("srcset");
-    if (!/^https?:/i.test(src)) {
-      img.remove();
-      continue;
-    }
     let rec = images.get(src);
-    if (!rec) {
-      if (images.size >= MAX_IMAGES) {
-        img.remove();
-        continue;
-      }
-      try {
-        const res = await fetch(src, {
-          headers: FETCH_HEADERS,
-          redirect: "follow",
-          signal: AbortSignal.timeout(20_000),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const raw = Buffer.from(await res.arrayBuffer());
-        const ct = (res.headers.get("content-type") ?? "").split(";")[0].trim();
-        if (!ct.startsWith("image/") || raw.length > MAX_IMAGE_BYTES) throw new Error("unusable");
-        const safe = await kindleSafeImage(raw, ct);
-        if (!safe) throw new Error("unusable");
-        const path = `images/img${pad(++counter.n)}.${safe.ext}`;
-        oebps.file(path, safe.buf);
-        rec = { path, mediaType: safe.mediaType };
-        images.set(src, rec);
-      } catch {
-        img.remove(); // drop images we can't fetch rather than break the book
-        continue;
-      }
+    const safe = fetched.get(src);
+    if (!rec && safe && images.size < MAX_IMAGES) {
+      const path = `images/img${pad(++counter.n)}.${safe.ext}`;
+      oebps.file(path, safe.buf);
+      rec = { path, mediaType: safe.mediaType };
+      images.set(src, rec);
     }
-    img.setAttribute("src", rec.path);
+    if (rec) img.setAttribute("src", rec.path);
+    else img.remove(); // drop images we can't fetch rather than break the book
   }
 }
 
