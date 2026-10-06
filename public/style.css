@@ -79,6 +79,8 @@ header {
 header h1 { font-size: .95rem; margin: 0; font-weight: 650; letter-spacing: -.01em;
             display: flex; align-items: center; gap: .45rem; }
 .logo-glyph { font-size: 1.05rem; }
+.header-left { display: flex; align-items: center; gap: .6rem; min-width: 0; }
+#back-btn { display: none; }
 .header-actions { display: flex; gap: .6rem; align-items: center; }
 
 #kbd-hint { font-size: .74rem; color: var(--text-3); margin-right: .4rem;
@@ -339,3 +341,47 @@ dialog #modal-close { margin-top: .9rem; align-self: flex-start; }
   gap: .7rem; margin-top: .8rem;
 }
 #paste-error { font-size: .8rem; margin-right: auto; }
+
+/* ---------- phone: one column at a time ---------- */
+/* body[data-view] (set by main.ts) picks the column; the resizers and saved
+   collapsed widths are desktop-only. */
+@media (max-width: 760px) {
+  body { font-size: 15px; }
+  header { padding: .5rem .75rem; padding-top: max(.5rem, env(safe-area-inset-top)); gap: .5rem; }
+  header h1 { font-size: .9rem; }
+  .app-name, #kbd-hint, .col-resizer { display: none; }
+  body:not([data-view="emails"]) header h1 { display: none; }
+  body:not([data-view="emails"]) #back-btn { display: inline-flex; }
+  .header-actions { gap: .45rem; }
+  .switch-label { font-size: .78rem; }
+  header button, .switch-label { white-space: nowrap; }
+  .to-kindle { display: none; }
+  button { padding: .5rem .8rem; }
+
+  main { display: block; position: relative; }
+  #email-list, #items-col, #preview-col { display: none; }
+  .col.collapsed { overflow-y: auto; }
+  body[data-view="emails"] #email-list,
+  body[data-view="items"] #items-col,
+  body[data-view="preview"] #preview-col {
+    display: flex; flex-direction: column; position: absolute; inset: 0;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  body[data-view="emails"] #email-list { display: block; }
+
+  .email-card { padding: .8rem 1rem; }
+  .email-card .sender { font-size: .95rem; }
+  .email-card .subject { font-size: .9rem; }
+  .item-row { margin: 2px 4px; padding: .75rem .75rem; gap: .75rem; }
+  .item-row .title { font-size: .95rem; }
+  .item-row input { width: 22px; height: 22px; margin-top: 0; }
+
+  #preview-toolbar { padding: .45rem .75rem; gap: .6rem; }
+  #paper { padding: .5rem; }
+  #preview { border-radius: 8px; }
+
+  #toasts { left: .75rem; right: .75rem; bottom: calc(.75rem + env(safe-area-inset-bottom)); width: auto; max-width: none; }
+  dialog { width: 95%; max-height: 85vh; padding: 1rem; }
+  /* iOS zooms into inputs under 16px. */
+  #paste-title, #paste-body { font-size: 16px; }
+}

@@ -216,6 +216,7 @@ function activateEmail(nl: Newsletter): void {
   renderItems(nl);
   previewItem({ kind: "body", msg_id: nl.id, title: nl.subject });
   prefetchArticles(nl);
+  setView("items");
 }
 
 // Warm the server-side article cache for the selected newsletter so clicking
@@ -327,6 +328,7 @@ function itemRow(
       (i) => selKey(i.kind, i.msg_id, i.url) === key);
     focusPane = "items";
     previewItem(item);
+    setView("preview");
   });
   return row;
 }
@@ -395,13 +397,23 @@ function showPreviewStatus(
 }
 
 function showPreviewHtml(title: string, html: string): void {
+  // Reloading an attached iframe adds a session-history entry, so Back (the
+  // phone layout's, or the browser's) would first step through old previews.
+  // A frame's first load after insertion doesn't, hence the detach/reattach.
+  const slot = previewFrame.parentNode as Node;
+  previewFrame.remove();
   previewFrame.srcdoc = `<!doctype html><html${darkReading ? ' class="dark"' : ""}><head><meta charset="utf-8">
     <style>body{font-family:Georgia,serif;max-width:640px;margin:1.5rem auto;padding:0 1.2rem 3rem;
-    line-height:1.55;color:#111;background:#fff} img{max-width:100%;height:auto}
+    line-height:1.55;color:#111;background:#fff;overflow-wrap:break-word} img{max-width:100%;height:auto}
+    video,iframe,figure,svg{max-width:100%} pre{white-space:pre-wrap}
+    table{max-width:100%}
+    @media (max-width:640px){table{width:100%!important}
+      td[width],th[width],div[style*="width"]{width:auto!important;max-width:100%!important}}
     a{color:#2563eb}
     html.dark{filter:invert(1) hue-rotate(180deg);background:#fff}
     html.dark img,html.dark video{filter:invert(1) hue-rotate(180deg)}</style>
     </head><body>${html}</body></html>`;
+  slot.appendChild(previewFrame);
   statusAction?.remove();
   statusAction = null;
   previewStatus.classList.add("hidden");
@@ -828,6 +840,26 @@ modal.addEventListener("pointerdown", (e) => { pressedBackdrop = onBackdrop(e); 
 modal.addEventListener("click", (e) => {
   if (pressedBackdrop && onBackdrop(e)) tryCloseModal();
 });
+
+// ---------- phone layout ----------
+// Narrow screens show one column at a time, picked by body[data-view] in the
+// CSS. Each step forward is a history entry, so the Back button and the iOS
+// back swipe walk out the same way they came in.
+type View = "emails" | "items" | "preview";
+const phoneLayout = window.matchMedia("(max-width: 760px)");
+
+function setView(view: View, push = true): void {
+  if (document.body.dataset.view === view) return;
+  document.body.dataset.view = view;
+  if (push && phoneLayout.matches) history.pushState({ view }, "");
+}
+
+history.replaceState({ view: "emails" }, "");
+window.addEventListener("popstate", (e) => {
+  const state = e.state as { view?: View } | null;
+  setView(state?.view ?? "emails", false);
+});
+$("back-btn").addEventListener("click", () => history.back());
 
 initResizers();
 loadNewsletters();
