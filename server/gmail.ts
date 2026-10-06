@@ -147,7 +147,7 @@ function encodeSubject(subject: string): string {
     : `=?UTF-8?B?${Buffer.from(subject, "utf8").toString("base64")}?=`;
 }
 
-function epubFilename(title: string): string {
+export function epubFilename(title: string): string {
   // Decompose first so accents become ASCII letters plus combining marks, and
   // drop the marks: "¿Cómo estás?" keeps its words as "Como estas" instead of
   // being gutted to "Cmo ests". Stays pure ASCII, so the filename needs no

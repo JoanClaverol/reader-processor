@@ -135,5 +135,6 @@ frontend (`frontend/`), built together by `pnpm run build` (which
   the error and nothing is sent for that item.
 - Junk-link filtering lives in `JUNK_TEXT` / `JUNK_HOSTS` in
   `server/extract.ts` — tune per your newsletters.
+- Tests: `pnpm test` (builds, then runs `node --test test/`).
 - To update: `git pull && pnpm install`.
 - To uninstall the global command: `pnpm remove --global reader-processor`.
