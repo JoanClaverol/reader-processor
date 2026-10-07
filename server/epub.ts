@@ -137,6 +137,7 @@ function stripKindleIncompatible(doc: Document): void {
   doc
     .querySelectorAll("audio, source, canvas, embed, iframe, object, script, svg, form")
     .forEach((el) => el.remove());
+  flattenLayoutTables(doc);
   // Amazon's converter crashes (E999) when an attribute value contains '>'
   // and other attributes follow it — even as the legal XHTML entity &gt;;
   // its tokenizer apparently decodes entities before splitting tags.
@@ -148,6 +149,50 @@ function stripKindleIncompatible(doc: Document): void {
       }
     }
   });
+}
+
+/**
+ * Newsletter bodies are laid out with nested <table> scaffolding, and Amazon's
+ * converter rejects a book that contains it (E013) instead of ignoring it.
+ * Confirmed 2026-08-18 by sending one Chartbook issue six ways: dropping the
+ * images, unwrapping the <figure>s and stripping every data-/aria-/role
+ * attribute all still bounced; flattening the tables was the only variant that
+ * converted. Nesting depth is not the trigger — La Bonilista nests seven deep
+ * and has always gone through — so the rule here is by purpose, not by shape:
+ * a table with no <th> and no <caption> of its own is scaffolding, and its
+ * cells become blocks, which is what a 6" screen wants anyway. Real data
+ * tables are left alone.
+ */
+function flattenLayoutTables(doc: Document): void {
+  const tables = [...doc.querySelectorAll("table")];
+  // A <th> inside a nested table says nothing about the table wrapping it, so
+  // ownership is decided by the nearest enclosing table, not by descent.
+  const layout = new Set(
+    tables.filter(
+      (t) => ![...t.querySelectorAll("th, caption")].some((el) => el.closest("table") === t),
+    ),
+  );
+  if (layout.size === 0) return;
+
+  const owned = (selector: string) =>
+    [...doc.querySelectorAll(selector)].filter((el) => {
+      const table = el.closest("table");
+      return table !== null && layout.has(table);
+    });
+
+  // Cells first, then rows, then the tables themselves: every step above
+  // relies on closest("table") still resolving, so the tables go last.
+  for (const cell of owned("td")) {
+    const div = doc.createElement("div");
+    div.append(...[...cell.childNodes]);
+    cell.replaceWith(div);
+  }
+  for (const el of owned("thead, tbody, tfoot, tr, colgroup, col")) {
+    el.replaceWith(...[...el.childNodes]);
+  }
+  for (const table of tables) {
+    if (layout.has(table)) table.replaceWith(...[...table.childNodes]);
+  }
 }
 
 // Precautionary: the largest Kindle screen is 1860×2480, so anything
@@ -212,45 +257,81 @@ function isProgressiveJpeg(buf: Buffer): boolean {
   return false;
 }
 
+const IMAGE_CONCURRENCY = 4;
+// Cap on attempts, not just successes: a newsletter full of dead tracker
+// images used to cost 20 s apiece, one after another.
+const MAX_IMAGE_ATTEMPTS = MAX_IMAGES * 2;
+
+type Fetched = { buf: Buffer; mediaType: string; ext: string } | null;
+
+/** Download with a size cap enforced while streaming, not after buffering. */
+async function fetchImage(src: string): Promise<Fetched> {
+  try {
+    const res = await fetch(src, {
+      headers: FETCH_HEADERS,
+      redirect: "follow",
+      signal: AbortSignal.timeout(20_000),
+    });
+    const ct = (res.headers.get("content-type") ?? "").split(";")[0].trim();
+    const declared = Number(res.headers.get("content-length") ?? 0);
+    if (!res.ok || !ct.startsWith("image/") || declared > MAX_IMAGE_BYTES || !res.body) {
+      await res.body?.cancel().catch(() => {});
+      return null;
+    }
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_IMAGE_BYTES) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+    return await kindleSafeImage(Buffer.concat(chunks), ct);
+  } catch {
+    return null;
+  }
+}
+
 async function embedImages(
   doc: Document, images: Map<string, ImageRec>, oebps: JSZip, counter: { n: number },
 ): Promise<void> {
   const imgs = [...doc.querySelectorAll("img")];
+  for (const img of imgs) img.removeAttribute("srcset");
+
+  // Fetch each new source once, a few at a time, in document order.
+  const pending = [
+    ...new Set(
+      imgs.map((img) => img.getAttribute("src") ?? "")
+        .filter((src) => /^https?:/i.test(src) && !images.has(src)),
+    ),
+  ].slice(0, MAX_IMAGE_ATTEMPTS);
+  const fetched = new Map<string, Fetched>();
+  let next = 0;
+  const worker = async () => {
+    while (next < pending.length) {
+      const src = pending[next++];
+      fetched.set(src, await fetchImage(src));
+    }
+  };
+  await Promise.all(Array.from({ length: IMAGE_CONCURRENCY }, worker));
+
   for (const img of imgs) {
     const src = img.getAttribute("src") ?? "";
-    img.removeAttribute("srcset");
-    if (!/^https?:/i.test(src)) {
-      img.remove();
-      continue;
-    }
     let rec = images.get(src);
-    if (!rec) {
-      if (images.size >= MAX_IMAGES) {
-        img.remove();
-        continue;
-      }
-      try {
-        const res = await fetch(src, {
-          headers: FETCH_HEADERS,
-          redirect: "follow",
-          signal: AbortSignal.timeout(20_000),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const raw = Buffer.from(await res.arrayBuffer());
-        const ct = (res.headers.get("content-type") ?? "").split(";")[0].trim();
-        if (!ct.startsWith("image/") || raw.length > MAX_IMAGE_BYTES) throw new Error("unusable");
-        const safe = await kindleSafeImage(raw, ct);
-        if (!safe) throw new Error("unusable");
-        const path = `images/img${pad(++counter.n)}.${safe.ext}`;
-        oebps.file(path, safe.buf);
-        rec = { path, mediaType: safe.mediaType };
-        images.set(src, rec);
-      } catch {
-        img.remove(); // drop images we can't fetch rather than break the book
-        continue;
-      }
+    const safe = fetched.get(src);
+    if (!rec && safe && images.size < MAX_IMAGES) {
+      const path = `images/img${pad(++counter.n)}.${safe.ext}`;
+      oebps.file(path, safe.buf);
+      rec = { path, mediaType: safe.mediaType };
+      images.set(src, rec);
     }
-    img.setAttribute("src", rec.path);
+    if (rec) img.setAttribute("src", rec.path);
+    else img.remove(); // drop images we can't fetch rather than break the book
   }
 }
 

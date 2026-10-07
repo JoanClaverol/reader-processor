@@ -78,10 +78,10 @@ pnpm run build:macos
 ```
 
 Open **Reader Processor** from Spotlight, the Dock, or Finder. It starts the
-local server and displays the dashboard in its own app window; quitting the app
-stops the server. The app currently launches the checkout at
-`~/Developer/reader-processor`, so update `repoPath` in
-`macos/ReaderProcessorMenu.swift` before building if yours lives elsewhere.
+local server and opens the dashboard in a dedicated Google Chrome app window.
+The launcher uses a separate Chrome profile so quitting that window with Cmd-Q
+also stops the server and the launcher. The build records the current checkout
+path in the app bundle, so rebuild the app after moving the repository.
 
 The UI is three columns: newsletters, the selected newsletter's items, and a
 preview of the selected content. Click a newsletter to preview its body; click
@@ -129,10 +129,12 @@ frontend (`frontend/`), built together by `pnpm run build` (which
 ## Notes
 
 - Message bodies are cached in SQLite, so only new newsletters hit the Gmail
-  API on page load.
+  API on page load. Cached messages and articles older than 60 days are pruned
+  at startup; the send log is kept.
 - If an article fails to extract (paywall, JS-only page), the result page shows
   the error and nothing is sent for that item.
 - Junk-link filtering lives in `JUNK_TEXT` / `JUNK_HOSTS` in
   `server/extract.ts` — tune per your newsletters.
+- Tests: `pnpm test` (builds, then runs `node --test test/`).
 - To update: `git pull && pnpm install`.
 - To uninstall the global command: `pnpm remove --global reader-processor`.

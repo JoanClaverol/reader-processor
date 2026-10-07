@@ -3,12 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Reader">
+  <meta name="theme-color" content="#141419">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
   <title>reader-processor</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body data-view="emails">
   <header>
-    <h1><span class="logo-glyph">📬</span> reader-processor</h1>
+    <div class="header-left">
+      <button id="back-btn" class="ghost" aria-label="Back">‹ Back</button>
+      <h1><span class="logo-glyph">📬</span> <span class="app-name">reader-processor</span></h1>
+    </div>
     <div class="header-actions">
       <span id="kbd-hint"><kbd>↑</kbd><kbd>↓</kbd> navigate · <kbd>⇥</kbd> pane · <kbd>space</kbd> select · <kbd>↵</kbd> preview · <kbd>S</kbd> send · <kbd>D</kbd> dark</span>
       <label id="bundle-toggle" class="switch" title="Combine everything selected into one book with chapters">
@@ -17,7 +25,7 @@
         <span class="switch-label">One book</span>
       </label>
       <button id="log-btn" class="ghost">Log</button>
-      <button id="send-btn" disabled>Send <span id="send-count" class="count-badge">0</span> to Kindle</button>
+      <button id="send-btn" disabled>Send <span id="send-count" class="count-badge">0</span><span class="to-kindle"> to Kindle</span></button>
     </div>
     <div id="send-progress" class="hidden"><div id="send-progress-fill"></div></div>
   </header>

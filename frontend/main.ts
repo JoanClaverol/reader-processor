@@ -31,6 +31,7 @@ const modalContent = $("modal-content");
 
 let newsletters: Newsletter[] = [];
 let activeId: string | null = null;
+let awaitingAuthentication = false;
 const viewed = new Set<string>(
   JSON.parse(localStorage.getItem("viewedEmails") ?? "[]") as string[],
 );
@@ -85,6 +86,18 @@ async function readJson(resp: Response): Promise<Record<string, any>> {
   }
 }
 
+// The server stores UTC timestamps without a zone suffix ("2026-10-05T23:30:00"),
+// which Date would otherwise parse as local time — shifting every card by the
+// UTC offset and filing late-night mail under the wrong day.
+function parseUtc(iso: string): Date {
+  return new Date(/Z|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z");
+}
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+const localTime = (d: Date) => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+const localDateTime = (d: Date) =>
+  `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${localTime(d)}`;
+
 function updateSendBtn(): void {
   sendCount.textContent = String(selected.size);
   sendBtn.disabled = selected.size === 0;
@@ -94,7 +107,7 @@ function updateSendBtn(): void {
 
 function dayLabel(iso: string): string {
   if (!iso) return "Unknown date";
-  const d = new Date(iso);
+  const d = parseUtc(iso);
   const today = new Date();
   const yesterday = new Date(today.getTime() - 86_400_000);
   const sameDay = (a: Date, b: Date) => a.toDateString() === b.toDateString();
@@ -118,6 +131,7 @@ async function loadNewsletters(): Promise<void> {
       const button = document.createElement("button");
       button.textContent = "Sign in with Google";
       button.addEventListener("click", () => {
+        awaitingAuthentication = true;
         window.location.href = "reader-processor://authenticate";
       });
       box.append(title, detail, button);
@@ -127,6 +141,7 @@ async function loadNewsletters(): Promise<void> {
     emailList.appendChild(box);
     return;
   }
+  awaitingAuthentication = false;
   newsletters = data.newsletters;
   sendBtn.title = `Deliver to ${data.kindle_email}`;
   renderEmailList();
@@ -180,7 +195,7 @@ function emailCard(nl: Newsletter): HTMLElement {
   card.dataset.emailId = nl.id;
   const sentCount = nl.links.filter((l) => l.sent).length + (nl.body_sent ? 1 : 0);
   const linkCount = nl.links.filter((l) => !l.junk).length;
-  const time = nl.date_iso ? nl.date_iso.slice(11, 16) : "";
+  const time = nl.date_iso ? localTime(parseUtc(nl.date_iso)) : "";
   const unread = !viewed.has(nl.id) && !isProcessed(nl);
   card.innerHTML = `
     <div class="sender">${unread ? '<span class="unread-dot"></span>' : ""}<span class="sender-name"></span></div>
@@ -201,6 +216,7 @@ function activateEmail(nl: Newsletter): void {
   renderItems(nl);
   previewItem({ kind: "body", msg_id: nl.id, title: nl.subject });
   prefetchArticles(nl);
+  setView("items");
 }
 
 // Warm the server-side article cache for the selected newsletter so clicking
@@ -312,6 +328,7 @@ function itemRow(
       (i) => selKey(i.kind, i.msg_id, i.url) === key);
     focusPane = "items";
     previewItem(item);
+    setView("preview");
   });
   return row;
 }
@@ -380,13 +397,23 @@ function showPreviewStatus(
 }
 
 function showPreviewHtml(title: string, html: string): void {
+  // Reloading an attached iframe adds a session-history entry, so Back (the
+  // phone layout's, or the browser's) would first step through old previews.
+  // A frame's first load after insertion doesn't, hence the detach/reattach.
+  const slot = previewFrame.parentNode as Node;
+  previewFrame.remove();
   previewFrame.srcdoc = `<!doctype html><html${darkReading ? ' class="dark"' : ""}><head><meta charset="utf-8">
     <style>body{font-family:Georgia,serif;max-width:640px;margin:1.5rem auto;padding:0 1.2rem 3rem;
-    line-height:1.55;color:#111;background:#fff} img{max-width:100%;height:auto}
+    line-height:1.55;color:#111;background:#fff;overflow-wrap:break-word} img{max-width:100%;height:auto}
+    video,iframe,figure,svg{max-width:100%} pre{white-space:pre-wrap}
+    table{max-width:100%}
+    @media (max-width:640px){table{width:100%!important}
+      td[width],th[width],div[style*="width"]{width:auto!important;max-width:100%!important}}
     a{color:#2563eb}
     html.dark{filter:invert(1) hue-rotate(180deg);background:#fff}
     html.dark img,html.dark video{filter:invert(1) hue-rotate(180deg)}</style>
     </head><body>${html}</body></html>`;
+  slot.appendChild(previewFrame);
   statusAction?.remove();
   statusAction = null;
   previewStatus.classList.add("hidden");
@@ -535,7 +562,7 @@ async function postSend(items: SelItem[], bundle: boolean): Promise<SendResult[]
       bundle,
     }),
   });
-  const data = await resp.json();
+  const data = await readJson(resp);
   if (!resp.ok) throw new Error(data.error ?? "server error");
   return data.results as SendResult[];
 }
@@ -775,11 +802,17 @@ function initResizers(): void {
 
 $("log-btn").addEventListener("click", async () => {
   const resp = await fetch("/api/log");
-  const data = await resp.json();
+  const data = await readJson(resp);
+  if (!resp.ok) {
+    modalContent.innerHTML = `<h3>Send log</h3><p class="fail">Couldn't load the log: ${escapeHtml(String(data.error ?? "server error"))}</p>`;
+    closeGuard = null;
+    modal.showModal();
+    return;
+  }
   interface LogEntry { created_at: string; kind: string; title: string; status: string; detail: string }
   const rows = (data.entries as LogEntry[]).map((e) => `
     <tr><td class="${e.status === "sent" ? "ok" : "fail"}">${e.status === "sent" ? "✓" : "✗"}</td>
-    <td>${e.created_at.replace("T", " ")}</td><td>${e.kind}</td>
+    <td>${localDateTime(parseUtc(e.created_at))}</td><td>${escapeHtml(e.kind)}</td>
     <td>${escapeHtml(e.title)}${e.detail ? `<br><small>${escapeHtml(e.detail)}</small>` : ""}</td></tr>`);
   modalContent.innerHTML = `<h3>Send log</h3><table>${rows.join("") || "<tr><td>Nothing sent yet.</td></tr>"}</table>`;
   closeGuard = null; // this content replaced whatever the guard was protecting
@@ -808,5 +841,30 @@ modal.addEventListener("click", (e) => {
   if (pressedBackdrop && onBackdrop(e)) tryCloseModal();
 });
 
+// ---------- phone layout ----------
+// Narrow screens show one column at a time, picked by body[data-view] in the
+// CSS. Each step forward is a history entry, so the Back button and the iOS
+// back swipe walk out the same way they came in.
+type View = "emails" | "items" | "preview";
+const phoneLayout = window.matchMedia("(max-width: 760px)");
+
+function setView(view: View, push = true): void {
+  if (document.body.dataset.view === view) return;
+  document.body.dataset.view = view;
+  if (push && phoneLayout.matches) history.pushState({ view }, "");
+}
+
+history.replaceState({ view: "emails" }, "");
+window.addEventListener("popstate", (e) => {
+  const state = e.state as { view?: View } | null;
+  setView(state?.view ?? "emails", false);
+});
+$("back-btn").addEventListener("click", () => history.back());
+
 initResizers();
 loadNewsletters();
+// Returning from the native OAuth flow focuses the Chrome app window again.
+// Refresh then so a newly written token takes effect without a manual reload.
+window.addEventListener("focus", () => {
+  if (awaitingAuthentication) void loadNewsletters();
+});

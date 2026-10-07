@@ -17,8 +17,17 @@ app.disable("x-powered-by");
 // The dashboard can read the user's email, so it must only ever answer the
 // user's own browser: reject any request whose Host header isn't a loopback
 // name (defeats DNS rebinding) and any state-changing request originating
-// from another website.
-const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+// from another website. READER_PROCESSOR_HOSTS (comma-separated) adds names
+// for a trusted private proxy, e.g. a `tailscale serve` *.ts.net hostname.
+const LOCAL_HOSTS = new Set([
+  "localhost",
+  "127.0.0.1",
+  "[::1]",
+  ...(process.env.READER_PROCESSOR_HOSTS ?? "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean),
+]);
 app.use((req, res, next) => {
   const host = (req.headers.host ?? "").replace(/:\d+$/, "");
   if (!LOCAL_HOSTS.has(host)) {
@@ -33,6 +42,14 @@ app.use((req, res, next) => {
       ok = false;
     }
     if (!ok) return res.status(403).json({ error: "Forbidden: cross-origin request" });
+  }
+  // Origin is absent on cross-site GETs, so the check above can't stop another
+  // website from making the server fetch arbitrary URLs (including LAN hosts)
+  // via /api/preview/article. Browsers label every such request with
+  // Sec-Fetch-Site; only the dashboard's own fetches say same-origin.
+  const site = req.headers["sec-fetch-site"];
+  if (req.path.startsWith("/api/") && (site === "cross-site" || site === "same-site")) {
+    return res.status(403).json({ error: "Forbidden: cross-site request" });
   }
   next();
 });
@@ -191,13 +208,62 @@ interface SendItem {
   url?: string | null;
 }
 
+function isSendItem(x: unknown): x is SendItem {
+  const item = x as Partial<SendItem> | null;
+  return (
+    typeof item?.msg_id === "string" &&
+    (item.kind === "body" || (item.kind === "link" && typeof item.url === "string"))
+  );
+}
+
 app.post("/api/send", async (req, res) => {
-  const items: SendItem[] = req.body?.items ?? [];
+  const items: unknown[] = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.every(isSendItem)) {
+    return res.status(400).json({ error: "each item needs a msg_id and kind body|link (links need a url)" });
+  }
   const bundle: boolean = !!req.body?.bundle && items.length > 1;
-  const config = loadConfig();
-  const g = gmail.gmailClient();
+  // Setup problems (no config, no token) must reach the dashboard as JSON, not
+  // as Express's HTML error page.
+  let config: Config;
+  let g: gmail.Gmail;
+  try {
+    config = loadConfig();
+    g = gmail.gmailClient();
+  } catch (e) {
+    const authRequired = gmail.isAuthError(e);
+    return res.status(authRequired ? 401 : 503).json({
+      error: String((e as Error).message ?? e),
+      code: authRequired ? "gmail_auth_required" : "setup_required",
+    });
+  }
   const results: SendResult[] = [];
   const touched = new Set<string>();
+
+  // The book is in Amazon's hands before this row is ever written, so a failed
+  // write must never be reported as a failed send. It used to be: recordSent
+  // sat inside the same try as sendEpub, and that catch called recordSent
+  // again, so a database that refused one write refused both, the second throw
+  // escaped the handler, and a delivered book left no row at all — which is
+  // how a real Kindle bounce later arrived with nothing to match it against.
+  // Same rule as the labelling below: bookkeeping reports, never overrules.
+  const logSent = (
+    item: SendItem,
+    title: string,
+    status: string,
+    detail = "",
+    filename: string | null = null,
+  ) => {
+    try {
+      store.recordSent(item.msg_id, item.kind, item.url ?? null, title, status, detail, filename);
+    } catch (e) {
+      results.push({
+        title: "send log",
+        ok: false,
+        warning: true,
+        detail: `couldn't record "${title}" as ${status} — ${String((e as Error).message ?? e)}`,
+      });
+    }
+  };
 
   // Resolve every item to a section (title + faithful html + source).
   const resolved: { item: SendItem; section: EpubSection; author: string }[] = [];
@@ -213,7 +279,7 @@ app.post("/api/send", async (req, res) => {
           author: parseSender(msg.sender),
         });
       } else {
-        const article = await getArticleCached(item.url!);
+        const article = await getArticleCached(item.url as string);
         title = article.title;
         url = article.url;
         resolved.push({
@@ -225,7 +291,7 @@ app.post("/api/send", async (req, res) => {
     } catch (e) {
       const shown = title ?? url ?? item.msg_id;
       const detail = String((e as Error).message ?? e);
-      store.recordSent(item.msg_id, item.kind, item.url ?? null, shown, "error", detail);
+      logSent(item, shown, "error", detail);
       results.push({ title: shown, ok: false, detail });
     }
   }
@@ -234,34 +300,40 @@ app.post("/api/send", async (req, res) => {
     // One book, each item a chapter with its own TOC entry.
     const date = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
     const bookTitle = `Reading digest — ${date}`;
+    // Only the build and the send belong in the try — see logSent above.
+    let filename: string | null = null;
+    let failure = "";
     try {
       const epub = await buildEpub(bookTitle, "reader-processor", resolved.map((r) => r.section));
-      const filename = await gmail.sendEpub(g, config.kindleEmail, bookTitle, epub);
-      for (const r of resolved) {
-        store.recordSent(r.item.msg_id, r.item.kind, r.item.url ?? null, r.section.title, "sent", `in "${bookTitle}"`, filename);
-        touched.add(r.item.msg_id);
-        results.push({ title: r.section.title, ok: true, detail: `chapter of "${bookTitle}"` });
-      }
+      filename = await gmail.sendEpub(g, config.kindleEmail, bookTitle, epub);
     } catch (e) {
-      const detail = String((e as Error).message ?? e);
-      for (const r of resolved) {
-        store.recordSent(r.item.msg_id, r.item.kind, r.item.url ?? null, r.section.title, "error", detail);
-        results.push({ title: r.section.title, ok: false, detail });
+      failure = String((e as Error).message ?? e);
+    }
+    for (const r of resolved) {
+      if (filename === null) {
+        logSent(r.item, r.section.title, "error", failure);
+        results.push({ title: r.section.title, ok: false, detail: failure });
+        continue;
       }
+      logSent(r.item, r.section.title, "sent", `in "${bookTitle}"`, filename);
+      touched.add(r.item.msg_id);
+      results.push({ title: r.section.title, ok: true, detail: `chapter of "${bookTitle}"` });
     }
   } else {
     for (const r of resolved) {
+      let filename: string;
       try {
         const epub = await buildEpub(r.section.title, r.author, [r.section]);
-        const filename = await gmail.sendEpub(g, config.kindleEmail, r.section.title, epub);
-        store.recordSent(r.item.msg_id, r.item.kind, r.item.url ?? null, r.section.title, "sent", "", filename);
-        touched.add(r.item.msg_id);
-        results.push({ title: r.section.title, ok: true, detail: "" });
+        filename = await gmail.sendEpub(g, config.kindleEmail, r.section.title, epub);
       } catch (e) {
         const detail = String((e as Error).message ?? e);
-        store.recordSent(r.item.msg_id, r.item.kind, r.item.url ?? null, r.section.title, "error", detail);
+        logSent(r.item, r.section.title, "error", detail);
         results.push({ title: r.section.title, ok: false, detail });
+        continue;
       }
+      logSent(r.item, r.section.title, "sent", "", filename);
+      touched.add(r.item.msg_id);
+      results.push({ title: r.section.title, ok: true, detail: "" });
     }
   }
 

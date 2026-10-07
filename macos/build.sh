@@ -3,6 +3,7 @@
 set -e
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$HERE/.." && pwd)
 if [ "$#" -eq 0 ]; then
   APP="$HOME/Applications/Reader Processor.app"
   # Replace the former menu-bar bundle instead of leaving a duplicate result
@@ -31,9 +32,19 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>ReaderProcessorRepoRoot</key><string>REPO_ROOT_PLACEHOLDER</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>com.joanclaverol.reader-processor.authenticate</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>reader-processor</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST
+/usr/libexec/PlistBuddy -c "Set :ReaderProcessorRepoRoot $REPO_ROOT" "$APP/Contents/Info.plist"
 
 # Build every required icon representation from the editable vector source.
 for spec in "16 icon_16x16.png" "32 icon_16x16@2x.png" \
@@ -49,11 +60,17 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 # Without an explicit -target, swiftc stamps the build host's macOS as the
 # minimum, so the LSMinimumSystemVersion above would be a decorative claim the
 # binary contradicts.
-swiftc -O -target "$(uname -m)-apple-macos13.0" -framework AppKit -framework WebKit \
+swiftc -O -target "$(uname -m)-apple-macos13.0" -framework AppKit \
   -o "$APP/Contents/MacOS/ReaderProcessor" "$HERE/ReaderProcessorMenu.swift"
 
 # Ad-hoc sign so Gatekeeper doesn't nag about a locally built bundle.
 codesign --force --sign - "$APP"
+
+# Replacing an app bundle in place can leave Spotlight and Launch Services
+# pointing at the deleted bundle inode until their next background scan.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+"$LSREGISTER" -f "$APP"
+mdimport "$APP" >/dev/null 2>&1 || true
 rm -rf "$HERE/.build"
 
 echo "Built $APP"

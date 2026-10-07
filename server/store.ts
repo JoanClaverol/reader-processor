@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { mkdirSync } from "fs";
+import { chmodSync, mkdirSync, readdirSync } from "fs";
 import path from "path";
 import { DATA_DIR } from "./config";
 
@@ -58,8 +58,39 @@ function conn(): Database.Database {
     } catch {
       /* column already exists */
     }
+    restrictPermissions();
+    pruneCaches(db);
   }
   return db;
+}
+
+/**
+ * The db holds email bodies and data/ holds the OAuth client and token, but
+ * mkdirSync's mode only applies when it creates the directory — a data/ left
+ * by an older checkout stayed world-readable. Tighten on every start.
+ */
+function restrictPermissions(): void {
+  const tighten = (p: string, mode: number) => {
+    try {
+      chmodSync(p, mode);
+    } catch {
+      /* missing file, or not ours to change */
+    }
+  };
+  tighten(DATA_DIR, 0o700);
+  for (const name of readdirSync(DATA_DIR)) tighten(path.join(DATA_DIR, name), 0o600);
+}
+
+// Both caches only ever serve the last `days_back` of mail; anything older
+// is dead weight (the db had grown past 40 MB). The send log is kept.
+const CACHE_TTL_DAYS = 60;
+
+function pruneCaches(conn: Database.Database): void {
+  const cutoff = new Date(Date.now() - CACHE_TTL_DAYS * 86_400_000).toISOString().slice(0, 19);
+  const gone =
+    conn.prepare("DELETE FROM messages WHERE fetched_at < ?").run(cutoff).changes +
+    conn.prepare("DELETE FROM articles WHERE fetched_at < ?").run(cutoff).changes;
+  if (gone > 0) conn.exec("VACUUM");
 }
 
 const now = () => new Date().toISOString().slice(0, 19);

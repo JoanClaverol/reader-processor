@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "fs";
 import path from "path";
 import { google } from "googleapis";
 import { DATA_DIR } from "./config";
@@ -23,17 +23,41 @@ export function makeOAuthClient(redirectUri?: string): OAuth2Client {
   return new google.auth.OAuth2(creds.client_id, creds.client_secret, redirectUri);
 }
 
+// One client per token.json version. A fresh client per request never learned
+// when its access token expired, so after the first hour every Gmail call made
+// a doomed 401 round-trip before refreshing — and the refreshed token was
+// thrown away with the client. Keyed on mtime so a re-auth (which rewrites the
+// file) takes effect on the next request.
+let cached: { mtimeMs: number; client: OAuth2Client } | null = null;
+
 /** Auth from the saved token — compatible with the token the Python app saved. */
 export function getAuth(): OAuth2Client {
   if (!existsSync(TOKEN_PATH)) {
     throw new Error("Not authenticated with Gmail. Run:  reader-process auth");
   }
+  const { mtimeMs } = statSync(TOKEN_PATH);
+  if (cached?.mtimeMs === mtimeMs) return cached.client;
+
   const token = JSON.parse(readFileSync(TOKEN_PATH, "utf8"));
   const client = makeOAuthClient();
+  // The Python app saved `token` + an ISO `expiry`; ours saves google-auth's shape.
+  const expiry = token.expiry_date ?? (token.expiry ? Date.parse(token.expiry) : undefined);
   client.setCredentials({
     refresh_token: token.refresh_token,
     access_token: token.access_token ?? token.token,
+    expiry_date: Number.isFinite(expiry) ? expiry : undefined,
   });
+  client.on("tokens", (fresh) => {
+    // Refreshes rarely carry a new refresh_token; keep the one on disk.
+    const merged = { ...token, ...fresh, refresh_token: fresh.refresh_token ?? token.refresh_token };
+    try {
+      writeFileSync(TOKEN_PATH, JSON.stringify(merged, null, 2), { mode: 0o600 });
+      if (cached?.client === client) cached.mtimeMs = statSync(TOKEN_PATH).mtimeMs;
+    } catch {
+      /* the in-memory client still holds the fresh token */
+    }
+  });
+  cached = { mtimeMs, client };
   return client;
 }
 
@@ -123,7 +147,7 @@ function encodeSubject(subject: string): string {
     : `=?UTF-8?B?${Buffer.from(subject, "utf8").toString("base64")}?=`;
 }
 
-function epubFilename(title: string): string {
+export function epubFilename(title: string): string {
   // Decompose first so accents become ASCII letters plus combining marks, and
   // drop the marks: "¿Cómo estás?" keeps its words as "Como estas" instead of
   // being gutted to "Cmo ests". Stays pure ASCII, so the filename needs no
