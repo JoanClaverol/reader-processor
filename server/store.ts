@@ -86,7 +86,7 @@ function restrictPermissions(): void {
 
 // Both caches only ever serve the last `days_back` of mail; anything older
 // is dead weight (the db had grown past 40 MB). The send log is kept.
-const CACHE_TTL_DAYS = 10;
+const CACHE_TTL_DAYS = 7;
 
 function pruneCaches(conn: Database.Database): void {
   const cutoff = new Date(Date.now() - CACHE_TTL_DAYS * 86_400_000).toISOString().slice(0, 19);
