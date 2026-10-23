@@ -8,6 +8,7 @@ const { noticeFlips } = require("../dist-server/bounces");
 const { unwrapTracking } = require("../dist-server/extract");
 const { epubFilename } = require("../dist-server/gmail");
 const { buildEpub } = require("../dist-server/epub");
+const { interstitialTarget } = require("../dist-server/fetchArticle");
 
 test("unwrapTracking follows tracker query params and path segments", () => {
   assert.equal(
@@ -85,4 +86,25 @@ test("buildEpub strips media and '>' inside attribute values", async () => {
   const xhtml = await chapterOf(`<p title="a > b">x</p><iframe src="https://e.x"></iframe><script>1</script>`);
   assert.doesNotMatch(xhtml, /<iframe|<script/);
   assert.match(xhtml, /title="a b"/);
+});
+
+const HS_PAGE = "https://cXK-504.na1.hubspotlinks.com/Ctc/OQ+113/cXK-504/VX3g0M4";
+const HS_BODY = `<html><head><script>window.location.replace(targetURL);</script></head>
+<body><h4>You're being redirected</h4>
+<p>If you're not redirected in a few seconds,
+<a href="https://cxk-504.na1.hubspotlinks.com/events/public/v1/encoded/track/tc/OQ+113/VX3g0M4?a=1&amp;b=0">click here</a></p>
+</body></html>`;
+
+test("interstitialTarget follows HubSpot's no-JS redirect link", () => {
+  assert.equal(
+    interstitialTarget(HS_PAGE, HS_BODY),
+    "https://cxk-504.na1.hubspotlinks.com/events/public/v1/encoded/track/tc/OQ+113/VX3g0M4?a=1&b=0",
+  );
+});
+
+test("interstitialTarget ignores pages off the tracker and links off it", () => {
+  // An ordinary article that happens to link into HubSpot is left alone.
+  assert.equal(interstitialTarget("https://news.example/a", HS_BODY), null);
+  const offTracker = `<a href="https://evil.example/track/x">click here</a>`;
+  assert.equal(interstitialTarget(HS_PAGE, offTracker), null);
 });

@@ -215,6 +215,39 @@ export function cleanArticleHtml(html: string, baseUrl: string): string {
   return doc.body?.innerHTML ?? html;
 }
 
+// HubSpot's click tracker doesn't answer with an HTTP redirect: it serves a
+// 200 "You're being redirected" page that fingerprints the browser in JS
+// before navigating. Its no-JS fallback <a> points at the tracker's own
+// /track/ endpoint, which does redirect properly to the article.
+const HUBSPOT_TRACKER = /(^|\.)hubspotlinks\.com$/i;
+
+const isHubSpotTracker = (url: string) => HUBSPOT_TRACKER.test(hostOf(url));
+
+/**
+ * Where a JS redirect page served at pageUrl wants to go, or null if it isn't
+ * one we recognise. Only HubSpot's tracker, and only a link back into that
+ * tracker, so an article that merely links to HubSpot is never hijacked.
+ */
+export function interstitialTarget(pageUrl: string, body: string): string | null {
+  if (!isHubSpotTracker(pageUrl)) return null;
+  const doc = parseHtml(body.slice(0, 200_000), pageUrl);
+  for (const a of doc.querySelectorAll("a[href]")) {
+    let href: URL;
+    try {
+      href = new URL(a.getAttribute("href")!, pageUrl);
+    } catch {
+      continue;
+    }
+    if (
+      href.protocol === "https:" && HUBSPOT_TRACKER.test(href.hostname) &&
+      href.pathname.includes("/track/") && href.href !== pageUrl
+    ) {
+      return href.href;
+    }
+  }
+  return null;
+}
+
 /**
  * Follow redirects and report where a URL actually lands, ignoring the status —
  * a bot wall still names the destination it refused to serve. Opaque shortcodes
@@ -222,7 +255,25 @@ export function cleanArticleHtml(html: string, baseUrl: string): string {
  * read, so only a request reveals it. Falls back to the input, because a slow
  * resolver must never cost the user a paste.
  */
-export async function resolveFinalUrl(url: string): Promise<string> {
+export async function resolveFinalUrl(url: string, hops = 0): Promise<string> {
+  const landed = await followRedirects(url);
+  // A HEAD can't see HubSpot's JS redirect page; read it to find the way on.
+  if (hops < 2 && isHubSpotTracker(landed)) {
+    try {
+      const resp = await fetch(landed, {
+        headers: FETCH_HEADERS,
+        signal: AbortSignal.timeout(8_000),
+      });
+      const next = interstitialTarget(resp.url, await resp.text());
+      if (next) return resolveFinalUrl(next, hops + 1);
+    } catch {
+      /* fall through: the tracker URL is still better than nothing */
+    }
+  }
+  return landed;
+}
+
+async function followRedirects(url: string): Promise<string> {
   // HEAD first: the redirect chain is all we want and there is no body to
   // download. But a redirector that rejects the method outright never
   // redirects at all, so fall back to GET when HEAD is refused — silently
@@ -247,7 +298,8 @@ export async function resolveFinalUrl(url: string): Promise<string> {
   return url;
 }
 
-export async function fetchArticle(url: string): Promise<Article> {
+/** hops counts JS redirect pages already followed, so two can't ping-pong. */
+export async function fetchArticle(url: string, hops = 0): Promise<Article> {
   let protocol: string;
   try {
     protocol = new URL(url).protocol;
@@ -283,6 +335,8 @@ export async function fetchArticle(url: string): Promise<Article> {
   if (!ctype.includes("html") && !/^\s*<(!doctype|html)/i.test(body)) {
     throw new FetchError(`not an HTML page (content-type: ${ctype || "unknown"})`);
   }
+  const next = hops < 2 ? interstitialTarget(resp.url, body) : null;
+  if (next) return fetchArticle(next, hops + 1);
   const doc = parseHtml(body, resp.url);
 
   let rawHtml: string;
